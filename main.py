@@ -8,7 +8,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or restrict to your frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,9 +31,9 @@ async def chat_with_llm(prompt: ChatPrompt):
     }
 
     payload = {
-        "model": "mixtral-8x7b-32768",  # or use "llama3-8b-8192"
+        "model": "mixtral-8x7b-32768",  # or try llama3-8b-8192
         "messages": [
-            {"role": "system", "content": "You are a helpful AI assistant that answers questions about project risk, delays, and team issues."},
+            {"role": "system", "content": "You are a helpful AI assistant."},
             {"role": "user", "content": prompt.message}
         ],
         "temperature": 0.7
@@ -41,11 +41,22 @@ async def chat_with_llm(prompt: ChatPrompt):
 
     try:
         response = requests.post(url, headers=headers, json=payload)
+        print("== Request Payload ==")
+        print(payload)
+        print("== Response Text ==")
+        print(response.text)
         response.raise_for_status()
         result = response.json()
         return {"response": result["choices"][0]["message"]["content"]}
     except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
+        return {
+            "error": str(e),
+            "debug_payload": payload,
+            "response_text": response.text,
+            "status_code": response.status_code
+        }
     except KeyError:
-        return {"error": "KeyError: Likely bad response from Groq. Check model name and structure."}
-
+        return {
+            "error": "KeyError: 'choices' missing in Groq response",
+            "full_response": response.text
+        }
