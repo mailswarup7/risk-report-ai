@@ -31,7 +31,7 @@ async def chat_with_llm(prompt: ChatPrompt):
     }
 
     payload = {
-        "model": "mixtral-8x7b-32768",  # or try llama3-8b-8192
+        "model": "llama3-8b-8192",
         "messages": [
             {"role": "system", "content": "You are a helpful AI assistant."},
             {"role": "user", "content": prompt.message}
