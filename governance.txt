@@ -1,0 +1,7 @@
+1. All client escalations must be responded to within 4 working hours.
+2. Project scope changes must be documented and approved by the Delivery Head.
+3. If delivery timelines are impacted, the client must be informed via email within 1 working day.
+4. Only Grade A accounts are eligible for CXO-level interventions unless revenue impact is significant.
+5. Burn rate above 80% before 50% project progress triggers Overburn Alert.
+6. Client sentiment is considered Red if 2 or more consecutive communication scores fall below 6.
+
