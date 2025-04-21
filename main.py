@@ -3,6 +3,7 @@ import requests
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Dict
 
 app = FastAPI()
 
@@ -14,61 +15,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Chat schema that supports message history
 class ChatPrompt(BaseModel):
-    message: str
-
-# Simple in-memory chat history (use user/session ID in production)
-chat_history = []
+    messages: List[Dict[str, str]]  # expects list of dicts like {"role": "user", "content": "..."}
 
 @app.post("/chat")
 async def chat_with_llm(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        return {"error": "\u26a0\ufe0f GROQ_API_KEY not set in environment"}
+        return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
     url = "https://api.groq.com/openai/v1/chat/completions"
+
+    # Add system prompt for governance assistant
+    full_messages = [
+        {"role": "system", "content": "You are a highly experienced Project Governance and Client Success Officer. Your job is to assess project health, risk of scope creep, client satisfaction, and delivery quality using governance best practices. Respond only based on project data and patterns."}
+    ] + prompt.messages
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
 
-    # Add the user's message to history
-    chat_history.append({"role": "user", "content": prompt.message})
-
-    # Persona system prompt
-    system_prompt = {
-        "role": "system",
-        "content": (
-            "You are a project governance and client success expert at a software company. "
-            "You specialize in identifying project risks like scope creep, overburn, client dissatisfaction, and delivery slippages. "
-            "When a user asks about project health, always ask for context like project name, delivery timelines, and recent risks. "
-            "Your job is to read project data and give insightful, actionable responses. "
-            "Keep answers short, sharp, and use simple language suitable for COOs and Delivery Heads."
-        )
-    }
-
     payload = {
         "model": "llama3-8b-8192",
-        "messages": [system_prompt] + chat_history,
+        "messages": full_messages,
         "temperature": 0.7
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload)
-        print("== Request Payload ==")
-        print(payload)
-        print("== Response Text ==")
-        print(response.text)
         response.raise_for_status()
         result = response.json()
-
-        # Append assistant's reply to history
-        assistant_reply = result["choices"][0]["message"]["content"]
-        chat_history.append({"role": "assistant", "content": assistant_reply})
-
-        return {"response": assistant_reply}
-
+        return {"response": result["choices"][0]["message"]["content"]}
     except requests.exceptions.RequestException as e:
         return {
             "error": str(e),
