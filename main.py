@@ -1,20 +1,23 @@
 import os
+import json
 import requests
 import firebase_admin
 from firebase_admin import credentials, db
 from fastapi import FastAPI
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict
 
 # Initialize Firebase
-if not firebase_admin._apps:
-    cred = credentials.Certificate("dbmeshboard-firebase.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://db-meshboard-database-default-rtdb.asia-southeast1.firebasedatabase.app'
-    })
+cred = credentials.Certificate("dbmeshboard-firebase.json")
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://db-meshboard-database-default-rtdb.asia-southeast1.firebasedatabase.app'
+})
 
+# Initialize FastAPI
 app = FastAPI()
 
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,20 +26,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Context for message memory
-chat_history = []
+# ========== FIREBASE ROUTE ==========
+
+@app.get("/data/email-logs")
+def get_email_logs():
+    ref = db.reference("/emailLogs")
+    data = ref.get()
+    return {"data": data}
+
+# ========== AI CHAT ROUTE ==========
 
 class ChatPrompt(BaseModel):
-    message: str
+    messages: List[Dict[str, str]]
 
 @app.post("/chat")
 async def chat_with_llm(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
-
-    # Maintain chat memory
-    chat_history.append({"role": "user", "content": prompt.message})
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -47,9 +54,8 @@ async def chat_with_llm(prompt: ChatPrompt):
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": "You are a highly experienced Project Governance and Client Success Officer. Be detailed, analytical, and focused on client retention and project health."},
-            *chat_history
-        ],
+            {"role": "system", "content": "You are a highly experienced Project Governance and Client Success Officer. Provide helpful, structured responses based on internal delivery review formats. Be concise but insightful."}
+        ] + [{"role": "user" if msg["sender"] == "user" else "assistant", "content": msg["text"]} for msg in prompt.messages],
         "temperature": 0.7
     }
 
@@ -57,28 +63,13 @@ async def chat_with_llm(prompt: ChatPrompt):
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
-        message = result["choices"][0]["message"]["content"]
-        chat_history.append({"role": "assistant", "content": message})
-        return {"response": message}
+        return {
+            "response": result["choices"][0]["message"]["content"]
+        }
     except requests.exceptions.RequestException as e:
         return {
             "error": str(e),
             "debug_payload": payload,
-            "response_text": response.text,
-            "status_code": response.status_code
+            "response_text": response.text if 'response' in locals() else None
         }
-    except KeyError:
-        return {
-            "error": "KeyError: 'choices' missing in Groq response",
-            "full_response": response.text
-        }
-
-@app.get("/data/email-logs")
-async def get_email_logs():
-    try:
-        ref = db.reference("/email-logs")  # Change this to your actual node
-        data = ref.get()
-        return {"data": data}
-    except Exception as e:
-        return {"error": str(e)}
 
