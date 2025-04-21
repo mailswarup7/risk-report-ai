@@ -2,11 +2,12 @@ import os
 import requests
 from fastapi import FastAPI
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+# Enable CORS so frontend can access the backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,9 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Chat schema that supports message history
+# Define the expected request body structure
+class ChatMessage(BaseModel):
+    sender: str  # 'user' or 'ai'
+    text: str
+
 class ChatPrompt(BaseModel):
-    messages: List[Dict[str, str]]  # expects list of dicts like {"role": "user", "content": "..."}
+    messages: List[Dict[str, str]]
 
 @app.post("/chat")
 async def chat_with_llm(prompt: ChatPrompt):
@@ -27,15 +32,28 @@ async def chat_with_llm(prompt: ChatPrompt):
 
     url = "https://api.groq.com/openai/v1/chat/completions"
 
-    # Add system prompt for governance assistant
-    full_messages = [
-        {"role": "system", "content": "You are a highly experienced Project Governance and Client Success Officer. Your job is to assess project health, risk of scope creep, client satisfaction, and delivery quality using governance best practices. Respond only based on project data and patterns."}
-    ] + prompt.messages
-
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
+    # Convert frontend sender/text to valid OpenAI role/content format
+    converted_msgs = []
+    for m in prompt.messages:
+        role = "user" if m["sender"] == "user" else "assistant"
+        converted_msgs.append({"role": role, "content": m["text"]})
+
+    # Add a system prompt to guide the LLM’s persona
+    full_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a highly experienced Project Governance and Client Success Officer. "
+                "Your job is to assess project health, scope risk, and delivery outcomes. "
+                "Use structured insights, talk like a seasoned governance expert, and keep context from previous user messages."
+            )
+        }
+    ] + converted_msgs
 
     payload = {
         "model": "llama3-8b-8192",
