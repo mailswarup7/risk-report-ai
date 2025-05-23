@@ -19,42 +19,60 @@ app.add_middleware(
 class ChatPrompt(BaseModel):
     message: str
 
+def extract_relevant_rows(sheet, keywords):
+    """Filter rows where any cell contains one of the keywords (case insensitive)"""
+    if not sheet:
+        return []
+
+    filtered = []
+    for row in sheet:
+        row_text = " ".join([str(cell).lower() for cell in row.values()])
+        if any(kw.lower() in row_text for kw in keywords):
+            filtered.append(row)
+    return filtered
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-    # Fetch sheet data
-    index = fetch_sheet_data("index").get("data", [])
-    extractor = fetch_sheet_data("extractor").get("data", [])
-    manager = fetch_sheet_data("manager").get("data", [])
+    # Load raw data from sheets
+    index_data = fetch_sheet_data("index")["data"]
+    extractor_data = fetch_sheet_data("extractor")["data"]
+    manager_data = fetch_sheet_data("manager")["data"]
 
-    # Smart context summarization
-    def smart_preview(data, label):
-        summary = f"--- {label} ---\n"
+    # Project name keywords to detect weak signals like 'Gro Digital'
+    keywords = ["gro", "gro digital", "letsgo", "letsgro", "freight", "fleet", "bss narayan", "abhishek srivastava"]
+
+    # Apply filtering for keyword matching rows (low visibility project boosting)
+    relevant_manager_rows = extract_relevant_rows(manager_data, keywords)
+    relevant_extractor_rows = extract_relevant_rows(extractor_data, keywords)
+    relevant_index_rows = extract_relevant_rows(index_data, keywords)
+
+    def summarize(data, label):
         if not data:
-            return summary + "No data found.\n"
-        for row in data[:5]:
-            summary += str(row) + "\n"
-        return summary + "\n"
+            return f"No data available in {label}.\n"
+        preview = "\n".join([str(row) for row in data[:3]])  # First 3 rows
+        return f"--- {label} ---\n{preview}\n\n"
 
-    # Define full LLM context
+    # Assemble the LLM context
     context = (
-        "You are a highly analytical Project Governance & Client Success Assistant.\n"
-        "Use the following structured sheet data to answer queries about:\n"
-        "- Project risks\n- Scope creep\n- Overburn\n- Client pulse\n- Internal & client email discussions\n\n"
-        f"{smart_preview(index, 'Index Sheet')}"
-        f"{smart_preview(extractor, 'Email Extractor Sheet')}"
-        f"{smart_preview(manager, 'Email Manager Sheet')}"
+        "You are a project governance and client success assistant.\n"
+        "Use the following extracted context from internal email/project logs to answer user questions "
+        "about project risks, scope creep, client status, SPOC, and delivery progress.\n"
+        "Even if the project has only one email reference, try to use that context if it's relevant.\n\n"
+        f"{summarize(relevant_index_rows, 'Index Sheet (filtered)')}"
+        f"{summarize(relevant_extractor_rows, 'Email Extractor (filtered)')}"
+        f"{summarize(relevant_manager_rows, 'Email Manager (filtered)')}"
     )
 
-    # GROQ call
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
@@ -67,7 +85,8 @@ async def chat_with_context(prompt: ChatPrompt):
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        return {"response": response.json()["choices"][0]["message"]["content"]}
+        result = response.json()
+        return {"response": result["choices"][0]["message"]["content"]}
     except requests.exceptions.RequestException as e:
         return {
             "error": str(e),
