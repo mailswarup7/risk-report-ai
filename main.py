@@ -19,6 +19,12 @@ app.add_middleware(
 class ChatPrompt(BaseModel):
     message: str
 
+# 🔁 Utility: Row matcher based on keyword phrases
+def row_matches_query(row, keywords):
+    text = " ".join([str(cell).lower() for cell in row.values()])
+    return any(keyword.lower() in text for keyword in keywords)
+
+# 🔁 Chat endpoint
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
@@ -29,36 +35,43 @@ async def chat_with_context(prompt: ChatPrompt):
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    # Lowercased version of the user query for fuzzy project match
-    user_query = prompt.message.lower()
+    # Dynamically build a project keyword list from the "Project Name" column
+    project_keywords = list({
+        str(row.get("Project Name", "")).strip()
+        for row in index_data + manager_data
+        if row.get("Project Name")
+    })
 
-    def filter_data_by_project(rows, sheet_name):
-        matches = []
-        for row in rows:
-            for cell in row.values():
-                if isinstance(cell, str) and any(token in cell.lower() for token in user_query.split()):
-                    matches.append(row)
-                    break
-        return matches
+    user_query = prompt.message.strip().lower()
 
-    index_matches = filter_data_by_project(index_data, "Index")
-    extractor_matches = filter_data_by_project(extractor_data, "Email Extractor")
-    manager_matches = filter_data_by_project(manager_data, "Email Manager")
+    matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
+    keywords_to_check = matched_keywords if matched_keywords else user_query.split()
+
+    relevant_index = [row for row in index_data if row_matches_query(row, keywords_to_check)]
+    relevant_extractor = [row for row in extractor_data if row_matches_query(row, keywords_to_check)]
+    relevant_manager = [row for row in manager_data if row_matches_query(row, keywords_to_check)]
 
     def summarize(data, label):
         if not data:
-            return f"No relevant rows found in {label}.\n"
-        preview = "\n".join([str(row) for row in data[:5]])  # Top 5 matching rows
+            return f"No data available in {label}.\n"
+        preview = "\n".join([str(row) for row in data[:3]])
         return f"--- {label} ---\n{preview}\n\n"
 
-    context = (
-        "You are a project governance and client success assistant.\n"
-        "Use only the following filtered data to answer the user's current question.\n"
-        "The data is extracted from Google Sheets and has been pre-filtered for relevance to the user query.\n\n"
-        f"{summarize(index_matches, 'Index')}"
-        f"{summarize(extractor_matches, 'Email Extractor')}"
-        f"{summarize(manager_matches, 'Email Manager')}"
-    )
+    if not relevant_index and not relevant_extractor and not relevant_manager:
+        context = (
+            f"You are a project governance and client success assistant.\n\n"
+            f"⚠️ The user asked about '{prompt.message}', but no relevant data was found "
+            f"in the Index, Email Extractor, or Email Manager sheets.\n\n"
+            f"Respond accordingly and suggest checking with the project team."
+        )
+    else:
+        context = (
+            "You are a project governance and client success assistant.\n"
+            "Use the filtered data below to answer the user's question about project risks, scope creep, or delivery:\n\n"
+            f"{summarize(relevant_index, 'Index')}"
+            f"{summarize(relevant_extractor, 'Email Extractor')}"
+            f"{summarize(relevant_manager, 'Email Manager')}"
+        )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -88,6 +101,7 @@ async def chat_with_context(prompt: ChatPrompt):
             "status_code": getattr(e.response, "status_code", "")
         }
 
+# 📄 Sheet APIs
 @app.get("/data/index-sheet")
 async def get_index_sheet_data():
     return fetch_sheet_data("index")
