@@ -25,25 +25,39 @@ async def chat_with_context(prompt: ChatPrompt):
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-    # Fetch live Google Sheet data
     index_data = fetch_sheet_data("index")["data"]
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
+    # Lowercased version of the user query for fuzzy project match
+    user_query = prompt.message.lower()
+
+    def filter_data_by_project(rows, sheet_name):
+        matches = []
+        for row in rows:
+            for cell in row.values():
+                if isinstance(cell, str) and any(token in cell.lower() for token in user_query.split()):
+                    matches.append(row)
+                    break
+        return matches
+
+    index_matches = filter_data_by_project(index_data, "Index")
+    extractor_matches = filter_data_by_project(extractor_data, "Email Extractor")
+    manager_matches = filter_data_by_project(manager_data, "Email Manager")
+
     def summarize(data, label):
         if not data:
-            return f"No data found in {label} sheet.\n"
-        preview = "\n".join([str(row) for row in data[:3]])  # Just sample first 3 rows
-        return f"--- {label} ---\n{preview}\n"
+            return f"No relevant rows found in {label}.\n"
+        preview = "\n".join([str(row) for row in data[:5]])  # Top 5 matching rows
+        return f"--- {label} ---\n{preview}\n\n"
 
-    # Context built per user message (no memory from previous requests)
     context = (
         "You are a project governance and client success assistant.\n"
-        "Use only the following data to answer the user's current query.\n"
-        "DO NOT carry over memory or assumptions from previous user messages.\n\n"
-        f"{summarize(index_data, 'Index')}"
-        f"{summarize(extractor_data, 'Email Extractor')}"
-        f"{summarize(manager_data, 'Email Manager')}"
+        "Use only the following filtered data to answer the user's current question.\n"
+        "The data is extracted from Google Sheets and has been pre-filtered for relevance to the user query.\n\n"
+        f"{summarize(index_matches, 'Index')}"
+        f"{summarize(extractor_matches, 'Email Extractor')}"
+        f"{summarize(manager_matches, 'Email Manager')}"
     )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -85,4 +99,3 @@ async def get_email_extractor_data():
 @app.get("/data/email-manager")
 async def get_email_manager_data():
     return fetch_sheet_data("manager")
-
