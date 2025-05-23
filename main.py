@@ -16,44 +16,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Input schema
 class ChatPrompt(BaseModel):
     message: str
 
-# ===========================
-# 🔁 Chat endpoint (with context)
-# ===========================
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-    # Load Google Sheet data
-    index_data = fetch_sheet_data("index")["data"]
-    extractor_data = fetch_sheet_data("extractor")["data"]
-    manager_data = fetch_sheet_data("manager")["data"]
+    # Fetch sheet data
+    index = fetch_sheet_data("index").get("data", [])
+    extractor = fetch_sheet_data("extractor").get("data", [])
+    manager = fetch_sheet_data("manager").get("data", [])
 
-    def summarize(data, label):
+    # Smart context summarization
+    def smart_preview(data, label):
+        summary = f"--- {label} ---\n"
         if not data:
-            return f"No data available in {label}.\n"
-        preview = "\n".join([str(row) for row in data[:3]])  # First 3 rows
-        return f"--- {label} ---\n{preview}\n\n"
+            return summary + "No data found.\n"
+        for row in data[:5]:
+            summary += str(row) + "\n"
+        return summary + "\n"
 
+    # Define full LLM context
     context = (
-        "You are a project governance and client success assistant.\n"
-        "Use the following sheet data to answer user queries about project risks, scope creep, client pulse, overburn, and delivery status:\n\n"
-        f"{summarize(index_data, 'Index')}"
-        f"{summarize(extractor_data, 'Email Extractor')}"
-        f"{summarize(manager_data, 'Email Manager')}"
+        "You are a highly analytical Project Governance & Client Success Assistant.\n"
+        "Use the following structured sheet data to answer queries about:\n"
+        "- Project risks\n- Scope creep\n- Overburn\n- Client pulse\n- Internal & client email discussions\n\n"
+        f"{smart_preview(index, 'Index Sheet')}"
+        f"{smart_preview(extractor, 'Email Extractor Sheet')}"
+        f"{smart_preview(manager, 'Email Manager Sheet')}"
     )
 
+    # GROQ call
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
@@ -66,8 +67,7 @@ async def chat_with_context(prompt: ChatPrompt):
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        result = response.json()
-        return {"response": result["choices"][0]["message"]["content"]}
+        return {"response": response.json()["choices"][0]["message"]["content"]}
     except requests.exceptions.RequestException as e:
         return {
             "error": str(e),
@@ -76,9 +76,6 @@ async def chat_with_context(prompt: ChatPrompt):
             "status_code": getattr(e.response, "status_code", "")
         }
 
-# ===========================
-# 📄 Sheet APIs (already working)
-# ===========================
 @app.get("/data/index-sheet")
 async def get_index_sheet_data():
     return fetch_sheet_data("index")
