@@ -19,52 +19,31 @@ app.add_middleware(
 class ChatPrompt(BaseModel):
     message: str
 
-def extract_relevant_rows(sheet, keywords):
-    """Filter rows where any cell contains one of the keywords (case insensitive)"""
-    if not sheet:
-        return []
-
-    filtered = []
-    for row in sheet:
-        row_text = " ".join([str(cell).lower() for cell in row.values()])
-        if any(kw.lower() in row_text for kw in keywords):
-            filtered.append(row)
-    return filtered
-
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-    # Load raw data from sheets
+    # Fetch live Google Sheet data
     index_data = fetch_sheet_data("index")["data"]
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    # Project name keywords to detect weak signals like 'Gro Digital'
-    keywords = ["gro", "gro digital", "letsgo", "letsgro", "freight", "fleet", "bss narayan", "abhishek srivastava"]
-
-    # Apply filtering for keyword matching rows (low visibility project boosting)
-    relevant_manager_rows = extract_relevant_rows(manager_data, keywords)
-    relevant_extractor_rows = extract_relevant_rows(extractor_data, keywords)
-    relevant_index_rows = extract_relevant_rows(index_data, keywords)
-
     def summarize(data, label):
         if not data:
-            return f"No data available in {label}.\n"
-        preview = "\n".join([str(row) for row in data[:3]])  # First 3 rows
-        return f"--- {label} ---\n{preview}\n\n"
+            return f"No data found in {label} sheet.\n"
+        preview = "\n".join([str(row) for row in data[:3]])  # Just sample first 3 rows
+        return f"--- {label} ---\n{preview}\n"
 
-    # Assemble the LLM context
+    # Context built per user message (no memory from previous requests)
     context = (
         "You are a project governance and client success assistant.\n"
-        "Use the following extracted context from internal email/project logs to answer user questions "
-        "about project risks, scope creep, client status, SPOC, and delivery progress.\n"
-        "Even if the project has only one email reference, try to use that context if it's relevant.\n\n"
-        f"{summarize(relevant_index_rows, 'Index Sheet (filtered)')}"
-        f"{summarize(relevant_extractor_rows, 'Email Extractor (filtered)')}"
-        f"{summarize(relevant_manager_rows, 'Email Manager (filtered)')}"
+        "Use only the following data to answer the user's current query.\n"
+        "DO NOT carry over memory or assumptions from previous user messages.\n\n"
+        f"{summarize(index_data, 'Index')}"
+        f"{summarize(extractor_data, 'Email Extractor')}"
+        f"{summarize(manager_data, 'Email Manager')}"
     )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
