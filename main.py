@@ -46,6 +46,14 @@ async def chat_with_context(prompt: ChatPrompt):
     matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
     keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
+    # 🧠 Heuristic: expand vague queries
+    expanded_query = prompt.message
+    if "scope creep" in user_query:
+        expanded_query += (
+            "\n\nPlease check if the project has introduced features, flows, or changes "
+            "that were not listed in the original scope document, or if any approvals are missing."
+        )
+
     relevant_index = [row for row in index_data if row_matches_query(row, keywords_to_check)]
     relevant_extractor = [row for row in extractor_data if row_matches_query(row, keywords_to_check)]
     relevant_manager = [row for row in manager_data if row_matches_query(row, keywords_to_check)]
@@ -67,14 +75,25 @@ async def chat_with_context(prompt: ChatPrompt):
         )
     else:
         context = (
-            "You are a project governance and client success assistant.\n"
-            "Use only the information provided below:\n\n"
             f"{doc_summary}"
             f"{summarize(relevant_index, 'Index')}"
             f"{summarize(relevant_extractor, 'Email Extractor')}"
             f"{summarize(relevant_manager, 'Email Manager')}"
         )
 
+    # 🧠 Instruction set to guide the LLM better
+    instruction_header = (
+        "You are an intelligent project governance and client success assistant AI.\n"
+        "Your goals:\n"
+        "1. Detect scope creep from scope vs email.\n"
+        "2. Identify delays, risks, and new requests.\n"
+        "3. Read tone of emails to understand client pulse.\n"
+        "4. Compare assumptions vs delivery reality.\n"
+        "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
+        "Always back up your reasoning with facts from the content.\n\n"
+    )
+
+    # 🔁 LLM call
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -86,13 +105,12 @@ async def chat_with_context(prompt: ChatPrompt):
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a project governance assistant. Use the scope document section ONLY for scope-related answers.\n"
-                    "Use email records only for updates, risks, or new flows. Do not mix these sources unless you explicitly say so.\n\n"
-                    f"{context}"
-                )
+                "content": instruction_header + context
             },
-            {"role": "user", "content": prompt.message}
+            {
+                "role": "user",
+                "content": expanded_query
+            }
         ],
         "temperature": 0.3
     }
