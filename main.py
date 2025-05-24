@@ -6,7 +6,6 @@ import requests
 from sheets_utils import fetch_sheet_data
 from google_docs_utils import get_scope_summary  # ✅ Enhanced summarizer version
 
-
 app = FastAPI()
 
 # Enable CORS
@@ -33,12 +32,10 @@ async def chat_with_context(prompt: ChatPrompt):
     if not api_key:
         return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-    # Load data
     index_data = fetch_sheet_data("index")["data"]
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    # 🔎 Extract project keywords dynamically
     project_keywords = list({
         str(row.get("Project Name", "")).strip()
         for row in index_data + manager_data
@@ -49,49 +46,52 @@ async def chat_with_context(prompt: ChatPrompt):
     matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
     keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
-    # 🔍 Match rows
     relevant_index = [row for row in index_data if row_matches_query(row, keywords_to_check)]
     relevant_extractor = [row for row in extractor_data if row_matches_query(row, keywords_to_check)]
     relevant_manager = [row for row in manager_data if row_matches_query(row, keywords_to_check)]
 
-    # 🧠 Attempt to fetch scope doc
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
-    doc_summary = f"--- Project Scope Document ({matched_keywords[0]}) ---\n{doc_context.strip()}\n\n" if doc_context else ""
+    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
 
     def summarize(data, label):
         if not data:
             return f"No data available in {label}.\n"
         preview = "\n".join([str(row) for row in data[:3]])
-        return f"--- {label} ---\n{preview}\n\n"
+        return f"--- 📧 {label} ---\n{preview}\n\n"
 
-    # 🧠 Build prompt context
     if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
         context = (
-            f"You are a project governance and client success assistant.\n\n"
-            f"⚠️ The user asked about '{prompt.message}', but no relevant data was found "
-            f"in the Index, Email Extractor, Email Manager sheets, or scope documents.\n\n"
-            f"Respond accordingly and suggest checking with the project team."
+            "You are a project governance and client success assistant.\n\n"
+            "The user asked a question, but no relevant scope or email records were found.\n"
+            "Kindly advise them to follow up with the project team for more information."
         )
     else:
         context = (
             "You are a project governance and client success assistant.\n"
-            "Use the following filtered data to answer the user's question about project risks, scope creep, or delivery status:\n\n"
+            "Use only the information provided below:\n\n"
             f"{doc_summary}"
             f"{summarize(relevant_index, 'Index')}"
             f"{summarize(relevant_extractor, 'Email Extractor')}"
             f"{summarize(relevant_manager, 'Email Manager')}"
         )
 
-    # 🔁 LLM call
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": context},
+            {
+                "role": "system",
+                "content": (
+                    "You are a project governance assistant. Use the scope document section ONLY for scope-related answers.\n"
+                    "Use email records only for updates, risks, or new flows. Do not mix these sources unless you explicitly say so.\n\n"
+                    f"{context}"
+                )
+            },
             {"role": "user", "content": prompt.message}
         ],
         "temperature": 0.3
