@@ -4,7 +4,8 @@ from pydantic import BaseModel
 import os
 import requests
 from sheets_utils import fetch_sheet_data
-from google_docs_utils import get_doc_content_by_project  # ✅ NEW
+from google_docs_utils import get_scope_summary  # ✅ Enhanced summarizer version
+
 
 app = FastAPI()
 
@@ -54,7 +55,7 @@ async def chat_with_context(prompt: ChatPrompt):
     relevant_manager = [row for row in manager_data if row_matches_query(row, keywords_to_check)]
 
     # 🧠 Attempt to fetch scope doc
-    doc_context = get_doc_content_by_project(matched_keywords[0]) if matched_keywords else ""
+    doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
     doc_summary = f"--- Project Scope Document ({matched_keywords[0]}) ---\n{doc_context.strip()}\n\n" if doc_context else ""
 
     def summarize(data, label):
