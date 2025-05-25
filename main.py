@@ -1,8 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
 import requests
+import tempfile
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
 from sheets_utils import fetch_sheet_data
 from google_docs_utils import get_scope_summary  # ✅ Enhanced summarizer version
 
@@ -46,7 +51,6 @@ async def chat_with_context(prompt: ChatPrompt):
     matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
     keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
-    # 🧠 Heuristic: expand vague queries
     expanded_query = prompt.message
     if "scope creep" in user_query:
         expanded_query += (
@@ -65,7 +69,7 @@ async def chat_with_context(prompt: ChatPrompt):
         if not data:
             return f"No data available in {label}.\n"
         preview = "\n".join([str(row) for row in data[:3]])
-        return f"--- 📧 {label} ---\n{preview}\n\n"
+        return f"--- 📬 {label} ---\n{preview}\n\n"
 
     if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
         context = (
@@ -81,7 +85,6 @@ async def chat_with_context(prompt: ChatPrompt):
             f"{summarize(relevant_manager, 'Email Manager')}"
         )
 
-    # 🧠 Instruction set to guide the LLM better
     instruction_header = (
         "You are an intelligent project governance and client success assistant AI.\n"
         "Your goals:\n"
@@ -93,7 +96,6 @@ async def chat_with_context(prompt: ChatPrompt):
         "Always back up your reasoning with facts from the content.\n\n"
     )
 
-    # 🔁 LLM call
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -103,14 +105,8 @@ async def chat_with_context(prompt: ChatPrompt):
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
-            {
-                "role": "system",
-                "content": instruction_header + context
-            },
-            {
-                "role": "user",
-                "content": expanded_query
-            }
+            {"role": "system", "content": instruction_header + context},
+            {"role": "user", "content": expanded_query}
         ],
         "temperature": 0.3
     }
@@ -140,3 +136,114 @@ async def get_email_extractor_data():
 @app.get("/data/email-manager")
 async def get_email_manager_data():
     return fetch_sheet_data("manager")
+
+@app.get("/risk-report/scope-creep/pdf")
+async def generate_scope_creep_pdf():
+    index_data = fetch_sheet_data("index")["data"]
+    extractor_data = fetch_sheet_data("extractor")["data"]
+    manager_data = fetch_sheet_data("manager")["data"]
+
+    scope_creep_keywords = [
+        "scope creep", "not in scope", "out of scope", "added",
+        "new module", "new flow", "change request", "requirement changed",
+        "change in plan", "beyond agreed", "expanded scope"
+    ]
+
+    resolution_keywords = [
+        "phase 2", "not included", "taken care", "will be done later",
+        "approved", "acknowledged", "follow-up", "client approved", "deferred"
+    ]
+
+    def evaluate_scope_creep_status(row):
+        combined_text = " ".join([str(v).lower() for v in row.values()])
+        if any(k in combined_text for k in scope_creep_keywords):
+            return "YES"
+        elif any(k in combined_text for k in resolution_keywords):
+            return "NO"
+        return "TBD"
+
+    summary_data = [
+        {
+            "Project Name": row.get("Project Name", ""),
+            "BU": row.get("BU", ""),
+            "Solution Center": row.get("Solution Center", ""),
+            "SCOPE CREEP SIGNAL": evaluate_scope_creep_status(row)
+        }
+        for row in index_data
+    ]
+
+    signal_log = [
+        row for row in extractor_data + manager_data
+        if any(k in str(row.get("Insights", "")).lower() for k in scope_creep_keywords)
+    ]
+
+    corrective_log = [
+        row for row in extractor_data + manager_data
+        if any(k in str(row.get("Insights", "")).lower() for k in resolution_keywords)
+    ]
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    c = canvas.Canvas(temp_file.name, pagesize=A4)
+    width, height = A4
+    y = height - 50
+
+    def draw_header(title):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(40, y, title)
+        y -= 30
+
+    def draw_table(headers, rows, bullet_colors=None):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 11)
+        x_positions = [40, 200, 350, 480]
+        for i, header in enumerate(headers):
+            c.drawString(x_positions[i], y, header)
+        y -= 18
+        c.setFont("Helvetica", 10)
+        for row in rows:
+            if y < 100:
+                c.showPage()
+                y = height - 50
+            for i, key in enumerate(headers):
+                text = str(row.get(key, ""))
+                if bullet_colors and i == len(headers) - 1:
+                    color = bullet_colors.get(text, colors.grey)
+                    c.setFillColor(color)
+                    c.circle(x_positions[i] - 10, y + 3, 5, fill=1)
+                    c.setFillColor(colors.black)
+                c.drawString(x_positions[i], y, text)
+            y -= 15
+
+    def draw_log_table(title, data):
+        nonlocal y
+        draw_header(title)
+        headers = ["Project", "Mode", "Date", "Insights"]
+        x_pos = [40, 150, 250, 320]
+        c.setFont("Helvetica-Bold", 11)
+        for i, h in enumerate(headers):
+            c.drawString(x_pos[i], y, h)
+        y -= 18
+        c.setFont("Helvetica", 10)
+        for row in data:
+            if y < 100:
+                c.showPage()
+                y = height - 50
+            c.drawString(x_pos[0], y, row.get("Project", ""))
+            c.drawString(x_pos[1], y, row.get("Mode", ""))
+            c.drawString(x_pos[2], y, row.get("Date", ""))
+            c.drawString(x_pos[3], y, str(row.get("Insights", ""))[:80])
+            y -= 15
+
+    draw_header("Scope Creep Summary Report")
+    draw_header("A.1 Summary View")
+    draw_table(
+        headers=["Project Name", "BU", "Solution Center", "SCOPE CREEP SIGNAL"],
+        rows=summary_data,
+        bullet_colors={"YES": colors.red, "NO": colors.green, "TBD": colors.gray}
+    )
+    draw_log_table("A.2 Scope Creep Signal Log", signal_log)
+    draw_log_table("A.3 Corrective Measures Taken Log", corrective_log)
+
+    c.save()
+    return FileResponse(temp_file.name, filename="ScopeCreepSummary.pdf")
