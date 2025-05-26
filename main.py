@@ -29,11 +29,11 @@ def row_matches_query(row, keywords):
     return any(keyword.lower() in text for keyword in keywords)
 
 def format_row(row):
-    keys = ["Email Record ID", "Date", "From", "Subject", "Body"]
+    keys = ["Email Record ID", "Date", "From", "Subject", "Body", "Project Name", "Insights"]
     return {k: row.get(k, "") for k in keys if k in row}
 
-def chunk_text(text, max_tokens=5000):
-    return text[:max_tokens * 4]
+def truncate_text(text, max_chars=15000):
+    return text[:max_chars]
 
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
@@ -62,14 +62,13 @@ async def chat_with_context(prompt: ChatPrompt):
             "that were not listed in the original scope document, or if any approvals are missing."
         )
 
-    def get_relevant_rows(data, keywords):
-        keyword_rows = [row for row in data if row_matches_query(row, keywords)]
-        recent_rows = data[-5:] if len(data) >= 5 else data
-        return list({id(row): row for row in keyword_rows + recent_rows}.values())
+    def filter_and_limit(data, project_names):
+        filtered = [row for row in data if str(row.get("Project Name", "")).lower() in [p.lower() for p in project_names]]
+        return sorted(filtered, key=lambda x: x.get("Date", ""), reverse=True)[:10]
 
-    relevant_index = get_relevant_rows(index_data, keywords_to_check)
-    relevant_extractor = get_relevant_rows(extractor_data, keywords_to_check)
-    relevant_manager = get_relevant_rows(manager_data, keywords_to_check)
+    relevant_index = filter_and_limit(index_data, matched_keywords)
+    relevant_extractor = filter_and_limit(extractor_data, matched_keywords)
+    relevant_manager = filter_and_limit(manager_data, matched_keywords)
 
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
     doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
@@ -83,30 +82,16 @@ async def chat_with_context(prompt: ChatPrompt):
         except Exception:
             data_sorted = data
 
-        latest_updates = []
-        open_concerns = []
-        completed_milestones = []
-        recent_rows = []
+        latest = [format_row(row) for row in data_sorted[:5]]
+        open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
+        completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
 
-        for row in data_sorted:
-            row_str = str(format_row(row))
-            row_lower = row_str.lower()
-            recent_rows.append(row_str)
-
-            if any(k in row_lower for k in ["completed", "100%", "signed off", "finalized"]):
-                completed_milestones.append(row_str)
-            elif any(k in row_lower for k in ["issue", "delay", "pending", "concern", "blocked", "escalated"]):
-                open_concerns.append(row_str)
-            else:
-                latest_updates.append(row_str)
-
-        sectioned_output = f"--- 📬 {label} ---\n"
-        sectioned_output += "\n📊 Recent Entries:\n" + "\n".join(recent_rows[:5]) + "\n"
+        output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
         if open_concerns:
-            sectioned_output += "\n⚠️ Open Concerns:\n" + "\n".join(open_concerns[:3]) + "\n"
-        if completed_milestones:
-            sectioned_output += "\n✅ Completed Milestones:\n" + "\n".join(completed_milestones[:3]) + "\n"
-        return sectioned_output + "\n"
+            output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
+        if completed:
+            output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
+        return output + "\n"
 
     if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
         context = (
@@ -133,9 +118,7 @@ async def chat_with_context(prompt: ChatPrompt):
         "Always back up your reasoning with facts from the content.\n\n"
     )
 
-    safe_context = chunk_text(context, max_tokens=5000)
-    final_payload = instruction_header + safe_context
-    print("Tokenized content length (approx):", len(final_payload) // 4)
+    final_context = truncate_text(instruction_header + context)
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -146,7 +129,7 @@ async def chat_with_context(prompt: ChatPrompt):
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": final_payload},
+            {"role": "system", "content": final_context},
             {"role": "user", "content": expanded_query}
         ],
         "temperature": 0.3
@@ -165,5 +148,161 @@ async def chat_with_context(prompt: ChatPrompt):
             "status_code": getattr(e.response, "status_code", "")
         }
 
-# All other endpoints (/data, /summary, /pdf) stay unchanged.
-# Keep this as-is from your working version unless you have further edits needed.
+# ➕ Scope Summary, PDF, and Sheet APIs remain unchanged
+
+@app.get("/data/index-sheet")
+async def get_index_sheet_data():
+    return fetch_sheet_data("index")
+
+@app.get("/data/email-extractor")
+async def get_email_extractor_data():
+    return fetch_sheet_data("extractor")
+
+@app.get("/data/email-manager")
+async def get_email_manager_data():
+    return fetch_sheet_data("manager")
+
+@app.get("/risk-report/scope-creep/summary")
+async def get_scope_creep_summary():
+    # (No changes required here. Already works as expected.)
+    index_data = fetch_sheet_data("index")["data"]
+    extractor_data = fetch_sheet_data("extractor")["data"]
+    manager_data = fetch_sheet_data("manager")["data"]
+
+    keywords = ["scope creep", "not in scope", "added", "new", "expanded"]
+    resolutions = ["approved", "acknowledged", "taken care", "phase 2"]
+
+    def eval_status(row):
+        t = " ".join([str(v).lower() for v in row.values()])
+        if any(k in t for k in keywords): return "YES"
+        if any(k in t for k in resolutions): return "NO"
+        return "TBD"
+
+    summary = [
+        {
+            "project": row.get("Project Name", ""),
+            "bu": row.get("BU", ""),
+            "solution_center": row.get("Solution Center", ""),
+            "status": eval_status(row)
+        }
+        for row in index_data
+    ]
+
+    signals = [
+        {k: r.get(k, "") for k in ["Project", "Mode", "Date", "Insights"]}
+        for r in extractor_data + manager_data
+        if any(k in str(r.get("Insights", "")).lower() for k in keywords)
+    ]
+
+    corrective = [
+        {k: r.get(k, "") for k in ["Project", "Mode", "Date", "Insights"]}
+        for r in extractor_data + manager_data
+        if any(k in str(r.get("Insights", "")).lower() for k in resolutions)
+    ]
+
+    return JSONResponse(content={
+        "summary": summary,
+        "signals": signals,
+        "corrective": corrective
+    })
+
+@app.get("/risk-report/scope-creep/pdf")
+async def generate_scope_creep_pdf():
+    # (Also unchanged — generates A1, A2, A3 sectioned report as PDF)
+    index_data = fetch_sheet_data("index")["data"]
+    extractor_data = fetch_sheet_data("extractor")["data"]
+    manager_data = fetch_sheet_data("manager")["data"]
+
+    keywords = ["scope creep", "not in scope", "added", "new", "expanded"]
+    resolutions = ["approved", "acknowledged", "taken care", "phase 2"]
+
+    def eval_status(row):
+        t = " ".join([str(v).lower() for v in row.values()])
+        if any(k in t for k in keywords): return "YES"
+        if any(k in t for k in resolutions): return "NO"
+        return "TBD"
+
+    summary = [
+        {
+            "Project Name": row.get("Project Name", ""),
+            "BU": row.get("BU", ""),
+            "Solution Center": row.get("Solution Center", ""),
+            "SCOPE CREEP SIGNAL": eval_status(row)
+        }
+        for row in index_data
+    ]
+
+    signals = [
+        r for r in extractor_data + manager_data
+        if any(k in str(r.get("Insights", "")).lower() for k in keywords)
+    ]
+
+    corrective = [
+        r for r in extractor_data + manager_data
+        if any(k in str(r.get("Insights", "")).lower() for k in resolutions)
+    ]
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    c = canvas.Canvas(temp_file.name, pagesize=A4)
+    width, height = A4
+    y = height - 50
+
+    def draw_header(title):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(40, y, title)
+        y -= 30
+
+    def draw_table(headers, rows, bullet_colors=None):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 11)
+        x_pos = [40, 200, 350, 480]
+        for i, h in enumerate(headers):
+            c.drawString(x_pos[i], y, h)
+        y -= 18
+        c.setFont("Helvetica", 10)
+        for row in rows:
+            if y < 100:
+                c.showPage()
+                y = height - 50
+            for i, k in enumerate(headers):
+                t = str(row.get(k, ""))
+                if bullet_colors and i == len(headers) - 1:
+                    c.setFillColor(bullet_colors.get(t, colors.grey))
+                    c.circle(x_pos[i] - 10, y + 3, 5, fill=1)
+                    c.setFillColor(colors.black)
+                c.drawString(x_pos[i], y, t)
+            y -= 15
+
+    def draw_log(title, rows):
+        nonlocal y
+        draw_header(title)
+        headers = ["Project", "Mode", "Date", "Insights"]
+        x_pos = [40, 150, 250, 320]
+        c.setFont("Helvetica-Bold", 11)
+        for i, h in enumerate(headers):
+            c.drawString(x_pos[i], y, h)
+        y -= 18
+        c.setFont("Helvetica", 10)
+        for row in rows:
+            if y < 100:
+                c.showPage()
+                y = height - 50
+            for i, k in enumerate(headers):
+                c.drawString(x_pos[i], y, str(row.get(k, ""))[:90])
+            y -= 15
+
+    draw_header("Scope Creep Summary Report")
+    draw_header("A.1 Summary View")
+    draw_table(
+        ["Project Name", "BU", "Solution Center", "SCOPE CREEP SIGNAL"],
+        summary,
+        bullet_colors={"YES": colors.red, "NO": colors.green, "TBD": colors.gray}
+    )
+    draw_log("A.2 Scope Creep Signal Log", signals)
+    draw_log("A.3 Corrective Measures Taken Log", corrective)
+
+    c.showPage()
+    c.save()
+    return FileResponse(temp_file.name, filename="ScopeCreepSummary.pdf", media_type="application/pdf")
+
