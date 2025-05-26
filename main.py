@@ -28,6 +28,11 @@ def row_matches_query(row, keywords):
     text = " ".join([str(cell).lower() for cell in row.values()])
     return any(keyword.lower() in text for keyword in keywords)
 
+def chunk_text(text: str, max_tokens: int = 6000) -> str:
+    # Naive truncation based on character count (~4 chars = 1 token)
+    max_chars = max_tokens * 4
+    return text[:max_chars]
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
@@ -55,9 +60,15 @@ async def chat_with_context(prompt: ChatPrompt):
             "that were not listed in the original scope document, or if any approvals are missing."
         )
 
-    relevant_index = [row for row in index_data if row_matches_query(row, keywords_to_check)]
-    relevant_extractor = [row for row in extractor_data if row_matches_query(row, keywords_to_check)]
-    relevant_manager = [row for row in manager_data if row_matches_query(row, keywords_to_check)]
+    def combine_rows(rows):
+        latest = sorted(rows, key=lambda x: x.get("Date", ""), reverse=True)[:5]
+        matched = [r for r in rows if row_matches_query(r, keywords_to_check)]
+        combined = {str(r): r for r in latest + matched}
+        return list(combined.values())
+
+    relevant_index = combine_rows(index_data)
+    relevant_extractor = combine_rows(extractor_data)
+    relevant_manager = combine_rows(manager_data)
 
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
     doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
@@ -66,11 +77,7 @@ async def chat_with_context(prompt: ChatPrompt):
         if not data:
             return f"No data available in {label}.\n"
 
-        try:
-            data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
-        except Exception:
-            data_sorted = data
-
+        data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
         latest_updates = []
         open_concerns = []
         completed_milestones = []
@@ -89,28 +96,19 @@ async def chat_with_context(prompt: ChatPrompt):
                 latest_updates.append(row_str)
 
         sectioned_output = f"--- 📬 {label} ---\n"
-        sectioned_output += "\n📊 Recent Entries (most recent on top):\n" + "\n".join(recent_rows[:5]) + "\n"
-
+        sectioned_output += "\n📊 Recent Entries:\n" + "\n".join(recent_rows[:5]) + "\n"
         if open_concerns:
             sectioned_output += "\n⚠️ Open Concerns:\n" + "\n".join(open_concerns[:3]) + "\n"
         if completed_milestones:
             sectioned_output += "\n✅ Completed Milestones:\n" + "\n".join(completed_milestones[:3]) + "\n"
-
         return sectioned_output + "\n"
 
-    if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
-        context = (
-            "You are a project governance and client success assistant.\n\n"
-            "The user asked a question, but no relevant scope or email records were found.\n"
-            "Kindly advise them to follow up with the project team for more information."
-        )
-    else:
-        context = (
-            f"{doc_summary}"
-            f"{summarize(relevant_index, 'Index')}"
-            f"{summarize(relevant_extractor, 'Email Extractor')}"
-            f"{summarize(relevant_manager, 'Email Manager')}"
-        )
+    context = (
+        f"{doc_summary}"
+        f"{summarize(relevant_index, 'Index')}"
+        f"{summarize(relevant_extractor, 'Email Extractor')}"
+        f"{summarize(relevant_manager, 'Email Manager')}"
+    )
 
     instruction_header = (
         "You are an intelligent project governance and client success assistant AI.\n"
@@ -123,6 +121,8 @@ async def chat_with_context(prompt: ChatPrompt):
         "Always back up your reasoning with facts from the content.\n\n"
     )
 
+    final_payload = instruction_header + chunk_text(context)
+
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -132,7 +132,7 @@ async def chat_with_context(prompt: ChatPrompt):
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": instruction_header + context},
+            {"role": "system", "content": final_payload},
             {"role": "user", "content": expanded_query}
         ],
         "temperature": 0.3
@@ -169,16 +169,8 @@ async def get_scope_creep_summary():
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    scope_creep_keywords = [
-        "scope creep", "not in scope", "out of scope", "added",
-        "new module", "new flow", "change request", "requirement changed",
-        "change in plan", "beyond agreed", "expanded scope"
-    ]
-
-    resolution_keywords = [
-        "phase 2", "not included", "taken care", "will be done later",
-        "approved", "acknowledged", "follow-up", "client approved", "deferred"
-    ]
+    scope_creep_keywords = ["scope creep", "not in scope", "added", "new flow", "expanded scope"]
+    resolution_keywords = ["approved", "taken care", "phase 2", "deferred", "follow-up"]
 
     def evaluate_scope_creep_status(row):
         combined_text = " ".join([str(v).lower() for v in row.values()])
@@ -198,7 +190,7 @@ async def get_scope_creep_summary():
         for row in index_data
     ]
 
-    scope_creep_signals = [
+    signals = [
         {
             "project": row.get("Project", ""),
             "mode": row.get("Mode", ""),
@@ -209,7 +201,7 @@ async def get_scope_creep_summary():
         if any(k in str(row.get("Insights", "")).lower() for k in scope_creep_keywords)
     ]
 
-    corrective_measures = [
+    corrective = [
         {
             "project": row.get("Project", ""),
             "mode": row.get("Mode", ""),
@@ -220,11 +212,7 @@ async def get_scope_creep_summary():
         if any(k in str(row.get("Insights", "")).lower() for k in resolution_keywords)
     ]
 
-    return JSONResponse(content={
-        "summary": summary_view,
-        "signals": scope_creep_signals,
-        "corrective": corrective_measures
-    })
+    return JSONResponse(content={"summary": summary_view, "signals": signals, "corrective": corrective})
 
 @app.get("/risk-report/scope-creep/pdf")
 async def generate_scope_creep_pdf():
@@ -232,16 +220,8 @@ async def generate_scope_creep_pdf():
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    scope_creep_keywords = [
-        "scope creep", "not in scope", "out of scope", "added",
-        "new module", "new flow", "change request", "requirement changed",
-        "change in plan", "beyond agreed", "expanded scope"
-    ]
-
-    resolution_keywords = [
-        "phase 2", "not included", "taken care", "will be done later",
-        "approved", "acknowledged", "follow-up", "client approved", "deferred"
-    ]
+    scope_creep_keywords = ["scope creep", "not in scope", "added", "new flow", "expanded scope"]
+    resolution_keywords = ["approved", "taken care", "phase 2", "deferred", "follow-up"]
 
     def evaluate_scope_creep_status(row):
         combined_text = " ".join([str(v).lower() for v in row.values()])
