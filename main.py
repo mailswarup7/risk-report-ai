@@ -74,10 +74,12 @@ async def chat_with_context(prompt: ChatPrompt):
         latest_updates = []
         open_concerns = []
         completed_milestones = []
+        recent_rows = []
 
-        for row in data_sorted[:10]:
+        for row in data_sorted:
             row_str = str(row)
             row_lower = row_str.lower()
+            recent_rows.append(row_str)
 
             if any(k in row_lower for k in ["completed", "100%", "signed off", "finalized"]):
                 completed_milestones.append(row_str)
@@ -87,8 +89,8 @@ async def chat_with_context(prompt: ChatPrompt):
                 latest_updates.append(row_str)
 
         sectioned_output = f"--- 📬 {label} ---\n"
-        if latest_updates:
-            sectioned_output += "\n📊 Latest Status Updates:\n" + "\n".join(latest_updates[:3]) + "\n"
+        sectioned_output += "\n📊 Recent Entries (most recent on top):\n" + "\n".join(recent_rows[:5]) + "\n"
+
         if open_concerns:
             sectioned_output += "\n⚠️ Open Concerns:\n" + "\n".join(open_concerns[:3]) + "\n"
         if completed_milestones:
