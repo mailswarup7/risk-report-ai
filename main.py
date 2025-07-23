@@ -103,9 +103,7 @@ async def chat_with_context(prompt: ChatPrompt):
     expanded_query = prompt.message
     if "scope creep" in user_query:
         expanded_query += (
-            "
-
-Please check if the project has introduced features, flows, or changes "
+            "\n\nPlease check if the project has introduced features, flows, or changes "
             "that were not listed in the original scope document, or if any approvals are missing."
         )
 
