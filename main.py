@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -35,7 +35,7 @@ def format_row(row):
 def truncate_text(text, max_chars=15000):
     return text[:max_chars]
 
-# ✅ Enhanced keyword list
+# --- ENHANCED KEYWORDS for eval_status ---
 keywords = [
     "scope creep", "not in scope", "out of scope", "added", "new", "expanded", "unplanned",
     "unexpected", "extra", "missed in original scope", "client requested change", "additional work",
@@ -46,8 +46,6 @@ resolutions = [
     "approved", "acknowledged", "taken care", "phase 2", "will be handled later", "excluded from scope",
     "client agreed", "deprioritized", "confirmed for next phase", "signed off", "clarified", "approved change"
 ]
-
-# ✅ LLM-based fallback function
 
 def classify_scope_creep_with_llm(text):
     api_key = os.getenv("GROQ_API_KEY")
@@ -71,14 +69,12 @@ def classify_scope_creep_with_llm(text):
     ]
     payload = {"model": "llama3-8b-8192", "messages": messages, "temperature": 0.1}
     try:
-        res = requests.post(url, headers=headers, json=payload)
+        res = requests.post(url, headers=headers, json=payload, timeout=8)
         res.raise_for_status()
         result = res.json()["choices"][0]["message"]["content"].strip().upper()
         return result if result in ["YES", "NO", "TBD"] else "TBD"
     except Exception:
         return "TBD"
-
-# 🔁 eval_status updated to use LLM fallback in /summary and /pdf endpoints.
 
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
@@ -116,16 +112,11 @@ async def chat_with_context(prompt: ChatPrompt):
     relevant_manager = filter_and_limit(manager_data, matched_keywords)
 
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
-    doc_summary = (
- f"--- 📄 Scope Document: {matched_keywords[0]} ---\n"
-f"{doc_context.strip()}\n\n"
-if doc_context else ""
-)
+    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
 
     def summarize(data, label):
         if not data:
-            return f"No data available in {label}.
-"
+            return f"No data available in {label}.\n"
 
         try:
             data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
@@ -136,34 +127,17 @@ if doc_context else ""
         open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
         completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
 
-        output = f"--- 📬 {label} ---
-
-📊 Latest Entries:
-" + "
-".join([str(r) for r in latest]) + "
-"
+        output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
         if open_concerns:
-            output += "
-⚠️ Open Concerns:
-" + "
-".join([str(r) for r in open_concerns[:3]]) + "
-"
+            output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
         if completed:
-            output += "
-✅ Completed Milestones:
-" + "
-".join([str(r) for r in completed[:3]]) + "
-"
-        return output + "
-"
+            output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
+        return output + "\n"
 
     if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
         context = (
-            "You are a project governance and client success assistant.
-
-"
-            "The user asked a question, but no relevant scope or email records were found.
-"
+            "You are a project governance and client success assistant.\n\n"
+            "The user asked a question, but no relevant scope or email records were found.\n"
             "Kindly advise them to follow up with the project team for more information."
         )
     else:
@@ -175,23 +149,14 @@ if doc_context else ""
         )
 
     instruction_header = (
-        "You are an intelligent project governance and client success assistant AI.
-"
-        "Your goals:
-"
-        "1. Detect scope creep from scope vs email.
-"
-        "2. Identify delays, risks, and new requests.
-"
-        "3. Read tone of emails to understand client pulse.
-"
-        "4. Compare assumptions vs delivery reality.
-"
-        "5. Suggest PM best practices (Agile, PMP) if gaps found.
-"
-        "Always back up your reasoning with facts from the content.
-
-"
+        "You are an intelligent project governance and client success assistant AI.\n"
+        "Your goals:\n"
+        "1. Detect scope creep from scope vs email.\n"
+        "2. Identify delays, risks, and new requests.\n"
+        "3. Read tone of emails to understand client pulse.\n"
+        "4. Compare assumptions vs delivery reality.\n"
+        "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
+        "Always back up your reasoning with facts from the content.\n\n"
     )
 
     final_context = truncate_text(instruction_header + context)
@@ -223,6 +188,18 @@ if doc_context else ""
             "response_text": getattr(e.response, "text", ""),
             "status_code": getattr(e.response, "status_code", "")
         }
+
+@app.get("/data/index-sheet")
+async def get_index_sheet_data():
+    return fetch_sheet_data("index")
+
+@app.get("/data/email-extractor")
+async def get_email_extractor_data():
+    return fetch_sheet_data("extractor")
+
+@app.get("/data/email-manager")
+async def get_email_manager_data():
+    return fetch_sheet_data("manager")
 
 @app.get("/risk-report/scope-creep/summary")
 async def get_scope_creep_summary():
