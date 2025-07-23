@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-from fastapi import FastAPI
-=======
 from fastapi import FastAPI, Request
->>>>>>> 52b7c8e (🔁 Added LLM-based scope creep detection and updated eval_status)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -364,3 +360,4 @@ async def generate_scope_creep_pdf():
     c.showPage()
     c.save()
     return FileResponse(temp_file.name, filename="ScopeCreepSummary.pdf", media_type="application/pdf")
+
