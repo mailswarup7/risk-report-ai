@@ -116,10 +116,11 @@ async def chat_with_context(prompt: ChatPrompt):
     relevant_manager = filter_and_limit(manager_data, matched_keywords)
 
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
-    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---
-{doc_context.strip()}
-
-" if doc_context else ""
+    doc_summary = (
+ f"--- 📄 Scope Document: {matched_keywords[0]} ---\n"
+f"{doc_context.strip()}\n\n"
+if doc_context else ""
+)
 
     def summarize(data, label):
         if not data:
