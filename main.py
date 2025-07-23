@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -306,29 +305,3 @@ async def generate_scope_creep_pdf():
     c.showPage()
     c.save()
     return FileResponse(temp_file.name, filename="ScopeCreepSummary.pdf", media_type="application/pdf")
-
-@app.post("/logs/upload")
-async def upload_manual_log(request: Request):
-    try:
-        payload = await request.json()
-        required_fields = ["Project", "Date", "Insights"]
-        if not all(k in payload and payload[k] for k in required_fields):
-            return {"error": "Missing required fields: Project, Date, Insights"}
-
-        # Add default Mode if not present
-        payload.setdefault("Mode", "Manual")
-
-        # Prepare row in correct structure
-        row_to_add = {
-            "Project": payload["Project"],
-            "Date": payload["Date"],
-            "Mode": payload["Mode"],
-            "Insights": payload["Insights"]
-        }
-
-        # Append to "manager" sheet
-        result = fetch_sheet_data("manager", mode="append", row=row_to_add)
-        return {"status": "success", "row_id": result.get("row_id", "N/A")}
-    except Exception as e:
-        return {"error": str(e)}
-
