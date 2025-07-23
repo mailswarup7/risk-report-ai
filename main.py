@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 from fastapi import FastAPI
+=======
+from fastapi import FastAPI, Request
+>>>>>>> 52b7c8e (🔁 Added LLM-based scope creep detection and updated eval_status)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -35,6 +39,51 @@ def format_row(row):
 def truncate_text(text, max_chars=15000):
     return text[:max_chars]
 
+# ✅ Enhanced keyword list
+keywords = [
+    "scope creep", "not in scope", "out of scope", "added", "new", "expanded", "unplanned",
+    "unexpected", "extra", "missed in original scope", "client requested change", "additional work",
+    "requirement change", "wasn’t discussed", "assumption mismatch", "change request",
+    "increase in scope", "modification", "gap"
+]
+resolutions = [
+    "approved", "acknowledged", "taken care", "phase 2", "will be handled later", "excluded from scope",
+    "client agreed", "deprioritized", "confirmed for next phase", "signed off", "clarified", "approved change"
+]
+
+# ✅ LLM-based fallback function
+
+def classify_scope_creep_with_llm(text):
+    api_key = os.getenv("GROQ_API_KEY")
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert project analyst. Read the text and decide if it shows:\n"
+                "1. Scope Creep (YES)\n"
+                "2. Resolved or Approved Changes (NO)\n"
+                "3. Not Sure or No Clear Signal (TBD)\n\n"
+                "Reply with only YES, NO, or TBD."
+            )
+        },
+        {"role": "user", "content": text[:4000]}
+    ]
+    payload = {"model": "llama3-8b-8192", "messages": messages, "temperature": 0.1}
+    try:
+        res = requests.post(url, headers=headers, json=payload)
+        res.raise_for_status()
+        result = res.json()["choices"][0]["message"]["content"].strip().upper()
+        return result if result in ["YES", "NO", "TBD"] else "TBD"
+    except Exception:
+        return "TBD"
+
+# 🔁 eval_status updated to use LLM fallback in /summary and /pdf endpoints.
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
@@ -58,7 +107,9 @@ async def chat_with_context(prompt: ChatPrompt):
     expanded_query = prompt.message
     if "scope creep" in user_query:
         expanded_query += (
-            "\n\nPlease check if the project has introduced features, flows, or changes "
+            "
+
+Please check if the project has introduced features, flows, or changes "
             "that were not listed in the original scope document, or if any approvals are missing."
         )
 
@@ -71,11 +122,15 @@ async def chat_with_context(prompt: ChatPrompt):
     relevant_manager = filter_and_limit(manager_data, matched_keywords)
 
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
-    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
+    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---
+{doc_context.strip()}
+
+" if doc_context else ""
 
     def summarize(data, label):
         if not data:
-            return f"No data available in {label}.\n"
+            return f"No data available in {label}.
+"
 
         try:
             data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
@@ -86,17 +141,34 @@ async def chat_with_context(prompt: ChatPrompt):
         open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
         completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
 
-        output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
+        output = f"--- 📬 {label} ---
+
+📊 Latest Entries:
+" + "
+".join([str(r) for r in latest]) + "
+"
         if open_concerns:
-            output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
+            output += "
+⚠️ Open Concerns:
+" + "
+".join([str(r) for r in open_concerns[:3]]) + "
+"
         if completed:
-            output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
-        return output + "\n"
+            output += "
+✅ Completed Milestones:
+" + "
+".join([str(r) for r in completed[:3]]) + "
+"
+        return output + "
+"
 
     if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
         context = (
-            "You are a project governance and client success assistant.\n\n"
-            "The user asked a question, but no relevant scope or email records were found.\n"
+            "You are a project governance and client success assistant.
+
+"
+            "The user asked a question, but no relevant scope or email records were found.
+"
             "Kindly advise them to follow up with the project team for more information."
         )
     else:
@@ -108,14 +180,23 @@ async def chat_with_context(prompt: ChatPrompt):
         )
 
     instruction_header = (
-        "You are an intelligent project governance and client success assistant AI.\n"
-        "Your goals:\n"
-        "1. Detect scope creep from scope vs email.\n"
-        "2. Identify delays, risks, and new requests.\n"
-        "3. Read tone of emails to understand client pulse.\n"
-        "4. Compare assumptions vs delivery reality.\n"
-        "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
-        "Always back up your reasoning with facts from the content.\n\n"
+        "You are an intelligent project governance and client success assistant AI.
+"
+        "Your goals:
+"
+        "1. Detect scope creep from scope vs email.
+"
+        "2. Identify delays, risks, and new requests.
+"
+        "3. Read tone of emails to understand client pulse.
+"
+        "4. Compare assumptions vs delivery reality.
+"
+        "5. Suggest PM best practices (Agile, PMP) if gaps found.
+"
+        "Always back up your reasoning with facts from the content.
+
+"
     )
 
     final_context = truncate_text(instruction_header + context)
@@ -148,35 +229,17 @@ async def chat_with_context(prompt: ChatPrompt):
             "status_code": getattr(e.response, "status_code", "")
         }
 
-# ➕ Scope Summary, PDF, and Sheet APIs remain unchanged
-
-@app.get("/data/index-sheet")
-async def get_index_sheet_data():
-    return fetch_sheet_data("index")
-
-@app.get("/data/email-extractor")
-async def get_email_extractor_data():
-    return fetch_sheet_data("extractor")
-
-@app.get("/data/email-manager")
-async def get_email_manager_data():
-    return fetch_sheet_data("manager")
-
 @app.get("/risk-report/scope-creep/summary")
 async def get_scope_creep_summary():
-    # (No changes required here. Already works as expected.)
     index_data = fetch_sheet_data("index")["data"]
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
-
-    keywords = ["scope creep", "not in scope", "added", "new", "expanded"]
-    resolutions = ["approved", "acknowledged", "taken care", "phase 2"]
 
     def eval_status(row):
         t = " ".join([str(v).lower() for v in row.values()])
         if any(k in t for k in keywords): return "YES"
         if any(k in t for k in resolutions): return "NO"
-        return "TBD"
+        return classify_scope_creep_with_llm(t)
 
     summary = [
         {
@@ -208,19 +271,15 @@ async def get_scope_creep_summary():
 
 @app.get("/risk-report/scope-creep/pdf")
 async def generate_scope_creep_pdf():
-    # (Also unchanged — generates A1, A2, A3 sectioned report as PDF)
     index_data = fetch_sheet_data("index")["data"]
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
-
-    keywords = ["scope creep", "not in scope", "added", "new", "expanded"]
-    resolutions = ["approved", "acknowledged", "taken care", "phase 2"]
 
     def eval_status(row):
         t = " ".join([str(v).lower() for v in row.values()])
         if any(k in t for k in keywords): return "YES"
         if any(k in t for k in resolutions): return "NO"
-        return "TBD"
+        return classify_scope_creep_with_llm(t)
 
     summary = [
         {
