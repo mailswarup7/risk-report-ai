@@ -71,7 +71,6 @@ def summarize_insight_llm(row):
         summary = res.json()["choices"][0]["message"]["content"].strip()
         return summary
     except Exception:
-        # fallback to summary or subject+date
         return row.get('Summary', row.get('Subject','No Subject')) + " (" + row.get('Date', row.get('date','')) + ")"
 
 def classify_scope_creep_with_llm(text):
@@ -135,6 +134,33 @@ def format_row(row):
     keys = ["Email Record ID", "Date", "From", "Subject", "Body", "Project Name", "BU", "Solution Center", "Mode", "Insights"]
     return {k: row.get(k, "") for k in keys if k in row}
 
+def safe_fetch(tabname, mode=None, summary_field=None, date_fields=None):
+    raw = fetch_sheet_data(tabname)
+    if not raw or "data" not in raw or not isinstance(raw["data"], list):
+        print(f"⚠️ Sheet/tab '{tabname}' missing or empty! Raw: {raw}")
+        return []
+    rows = raw["data"]
+    # For tldv manager (calls)
+    if mode and summary_field:
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["Mode"] = mode
+            d["Insights"] = row.get(summary_field, "")
+            # Choose best date field
+            d["Date"] = row.get(date_fields[0], "") if date_fields else row.get("Date", "")
+            for field in date_fields or []:
+                if row.get(field):
+                    d["Date"] = row.get(field)
+                    break
+            out.append(d)
+        return out
+    # For email/index etc.
+    elif mode:
+        return [dict(row, Mode=mode) for row in rows]
+    else:
+        return [dict(row) for row in rows]
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     try:
@@ -142,18 +168,10 @@ async def chat_with_context(prompt: ChatPrompt):
         if not api_key:
             return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-        index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
-        extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
-        manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
-        tldv_manager_data = [
-            {
-                **row,
-                "Mode": "call",
-                "Insights": row.get("Summary", ""),   # Use 'Summary' for insights
-                "Date": row.get("Date", row.get("Timestamp", "")),
-            }
-            for row in fetch_sheet_data("tldv manager")["data"]
-        ]
+        index_data      = safe_fetch("index", mode="meta")
+        extractor_data  = safe_fetch("extractor", mode="email")
+        manager_data    = safe_fetch("manager", mode="email")
+        tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
         all_data = index_data + extractor_data + manager_data + tldv_manager_data
 
         project_keywords = list({
@@ -213,7 +231,7 @@ async def chat_with_context(prompt: ChatPrompt):
         if not best_row and not doc_context and not completion_percent:
             context += (
                 "You are a project governance and client success assistant.\n\n"
-                "The user asked a question, but no relevant scope or email records were found.\n"
+                "The user asked a question, but no relevant scope or email/call records were found.\n"
                 "Kindly advise them to follow up with the project team for more information."
             )
         else:
@@ -285,20 +303,11 @@ async def get_tldv_manager_data():
 
 @app.get("/risk-report/scope-creep/summary")
 async def get_scope_creep_summary():
-    index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
-    extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
-    manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
-    tldv_manager_data = [
-        {
-            **row,
-            "Mode": "call",
-            "Insights": row.get("Summary", ""),
-            "Date": row.get("Date", row.get("Timestamp", "")),
-        }
-        for row in fetch_sheet_data("tldv manager")["data"]
-    ]
+    index_data      = safe_fetch("index", mode="meta")
+    extractor_data  = safe_fetch("extractor", mode="email")
+    manager_data    = safe_fetch("manager", mode="email")
+    tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
 
-    # Find all projects
     all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
     summary = []
@@ -335,7 +344,6 @@ async def get_scope_creep_summary():
 
     for pname in project_names:
         creep = creep_rows.get(pname, [])
-        resolved = resolution_rows.get(pname, [])
         status = "YES" if creep else "NO" if pname and not creep else "TBD"
         base_row = next((row for row in index_data if row.get("Project Name", "") == pname), {})
         summary.append({
@@ -383,18 +391,10 @@ async def get_scope_creep_summary():
 
 @app.get("/risk-report/scope-creep/pdf")
 async def generate_scope_creep_pdf():
-    index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
-    extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
-    manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
-    tldv_manager_data = [
-        {
-            **row,
-            "Mode": "call",
-            "Insights": row.get("Summary", ""),
-            "Date": row.get("Date", row.get("Timestamp", "")),
-        }
-        for row in fetch_sheet_data("tldv manager")["data"]
-    ]
+    index_data      = safe_fetch("index", mode="meta")
+    extractor_data  = safe_fetch("extractor", mode="email")
+    manager_data    = safe_fetch("manager", mode="email")
+    tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
 
     all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
@@ -432,7 +432,6 @@ async def generate_scope_creep_pdf():
 
     for pname in project_names:
         creep = creep_rows.get(pname, [])
-        resolved = resolution_rows.get(pname, [])
         status = "YES" if creep else "NO" if pname and not creep else "TBD"
         base_row = next((row for row in index_data if row.get("Project Name", "") == pname), {})
         summary.append({
