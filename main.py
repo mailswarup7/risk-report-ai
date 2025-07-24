@@ -140,14 +140,12 @@ def safe_fetch(tabname, mode=None, summary_field=None, date_fields=None):
         print(f"⚠️ Sheet/tab '{tabname}' missing or empty! Raw: {raw}")
         return []
     rows = raw["data"]
-    # For tldv manager (calls)
     if mode and summary_field:
         out = []
         for row in rows:
             d = dict(row)
             d["Mode"] = mode
             d["Insights"] = row.get(summary_field, "")
-            # Choose best date field
             d["Date"] = row.get(date_fields[0], "") if date_fields else row.get("Date", "")
             for field in date_fields or []:
                 if row.get(field):
@@ -155,7 +153,6 @@ def safe_fetch(tabname, mode=None, summary_field=None, date_fields=None):
                     break
             out.append(d)
         return out
-    # For email/index etc.
     elif mode:
         return [dict(row, Mode=mode) for row in rows]
     else:
@@ -184,6 +181,29 @@ async def chat_with_context(prompt: ChatPrompt):
         matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
         keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
+        # 👇👇 Always show latest call summary if the user asks about call/meeting
+        if "call" in user_query or "meeting" in user_query:
+            # Find calls for matching project(s)
+            matching_calls = []
+            for kw in keywords_to_check:
+                matching_calls += [
+                    row for row in tldv_manager_data
+                    if kw.lower() in row.get("Project Name", "").lower()
+                ]
+            if not matching_calls:
+                # fallback: any calls for any project
+                matching_calls = tldv_manager_data
+            if matching_calls:
+                latest_call = sorted(matching_calls, key=lambda x: x.get("Date", ""), reverse=True)[0]
+                summary = latest_call.get("Summary", latest_call.get("Insights", ""))
+                date = latest_call.get("Date", "")
+                pname = latest_call.get("Project Name", "")
+                meeting_title = latest_call.get("Meeting Title", "")
+                return {
+                    "response": f"Latest call/meeting for '{pname}'{f' ({meeting_title})' if meeting_title else ''} was on {date}.\nKey points:\n{summary}"
+                }
+
+        # If not a direct call/meeting question, proceed with LLM
         expanded_query = prompt.message
         if "scope creep" in user_query:
             expanded_query += (
@@ -387,7 +407,11 @@ async def get_scope_creep_summary():
                         "insights": insight_text,
                     })
 
-    return JSONResponse(content={"summary": summary, "signals": signals, "corrective": corrective})
+    return JSONResponse(content={
+        "summary": summary,
+        "signals": signals,
+        "corrective": corrective
+    })
 
 @app.get("/risk-report/scope-creep/pdf")
 async def generate_scope_creep_pdf():
