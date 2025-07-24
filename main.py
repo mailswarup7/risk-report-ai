@@ -49,13 +49,13 @@ def summarize_insight_llm(row):
     }
     prompt_text = (
         f"You are a governance analyst. Summarize the below communication into a 1-line conversational insight:\n"
-        f"Project: {row.get('Project Name')}\n"
-        f"Subject: {row.get('Subject')}\n"
-        f"From: {row.get('From')}\n"
+        f"Project: {row.get('Project Name', row.get('project', ''))}\n"
+        f"Subject: {row.get('Subject', '')}\n"
+        f"From: {row.get('From', '')}\n"
         f"To: {row.get('To', '')}\n"
-        f"Date: {row.get('Date')}\n"
+        f"Date: {row.get('Date', row.get('date', ''))}\n"
         f"Body: {row.get('Body', '')}\n"
-        f"Remark: {row.get('Insights', '')}\n"
+        f"Remark: {row.get('Insights', row.get('insights', row.get('Summary', '')))}\n"
     )
     payload = {
         "model": "llama3-8b-8192",
@@ -71,7 +71,8 @@ def summarize_insight_llm(row):
         summary = res.json()["choices"][0]["message"]["content"].strip()
         return summary
     except Exception:
-        return f"{row.get('Subject','No Subject')} ({row.get('Date','')})"
+        # fallback to summary or subject+date
+        return row.get('Summary', row.get('Subject','No Subject')) + " (" + row.get('Date', row.get('date','')) + ")"
 
 def classify_scope_creep_with_llm(text):
     api_key = os.getenv("GROQ_API_KEY")
@@ -141,11 +142,19 @@ async def chat_with_context(prompt: ChatPrompt):
         if not api_key:
             return {"error": "⚠️ GROQ_API_KEY not set in environment"}
 
-        index_data = fetch_sheet_data("index")["data"]
-        extractor_data = fetch_sheet_data("extractor")["data"]
-        manager_data = fetch_sheet_data("manager")["data"]
-
-        all_data = index_data + extractor_data + manager_data
+        index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
+        extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
+        manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
+        tldv_manager_data = [
+            {
+                **row,
+                "Mode": "call",
+                "Insights": row.get("Summary", ""),   # Use 'Summary' for insights
+                "Date": row.get("Date", row.get("Timestamp", "")),
+            }
+            for row in fetch_sheet_data("tldv manager")["data"]
+        ]
+        all_data = index_data + extractor_data + manager_data + tldv_manager_data
 
         project_keywords = list({
             str(row.get("Project Name", "")).strip()
@@ -157,7 +166,6 @@ async def chat_with_context(prompt: ChatPrompt):
         matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
         keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
-        # Always define expanded_query!
         expanded_query = prompt.message
         if "scope creep" in user_query:
             expanded_query += (
@@ -165,7 +173,6 @@ async def chat_with_context(prompt: ChatPrompt):
                 "that were not listed in the original scope document, or if any approvals are missing."
             )
 
-        # Find best/latest evidence
         best_row = None
         for kw in keywords_to_check:
             best_row = find_best_project_update(all_data, project_name=kw)
@@ -174,14 +181,10 @@ async def chat_with_context(prompt: ChatPrompt):
         if not best_row:
             best_row = find_best_project_update(all_data)
 
-        # Extract % completion, if any
         completion_percent = extract_completion_percent(all_data, project_name=matched_keywords[0] if matched_keywords else None)
-
-        # Build doc_context if project found
         doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
         doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
 
-        # Build context for LLM
         context = ""
         if completion_percent:
             context += f"\n--- 📊 % COMPLETION FOUND ---\nOverall Completion: {completion_percent}\n\n"
@@ -220,19 +223,19 @@ async def chat_with_context(prompt: ChatPrompt):
                 f"{summarize(index_data, 'Index')}"
                 f"{summarize(extractor_data, 'Email Extractor')}"
                 f"{summarize(manager_data, 'Email Manager')}"
+                f"{summarize(tldv_manager_data, 'Call Manager')}"
             )
 
-        # 🔥 STRONG LLM NUDGE
         instruction_header = (
             "You are an intelligent project governance and client success assistant AI.\n"
-            "You have access to all project emails and logs. Search for *any* evidence, even if not in the latest updates. "
+            "You have access to all project emails, calls, and logs. Search for *any* evidence, even if not in the latest updates. "
             "If you see a percentage completion (such as '80%'), ALWAYS report it and quote the source. "
             "Be specific in your findings. When a user asks about any kind of event (appreciation, bugs, risks, etc.), "
-            "scan ALL available records and answer with the best evidence you can find. Quote from emails if possible.\n"
+            "scan ALL available records and answer with the best evidence you can find. Quote from emails/calls if possible.\n"
             "Your goals:\n"
-            "1. Detect scope creep from scope vs email.\n"
+            "1. Detect scope creep from scope vs email/call.\n"
             "2. Identify delays, risks, and new requests.\n"
-            "3. Read tone of emails to understand client pulse.\n"
+            "3. Read tone of communication to understand client pulse.\n"
             "4. Compare assumptions vs delivery reality.\n"
             "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
             "Always back up your reasoning with facts from the content.\n\n"
@@ -276,19 +279,32 @@ async def get_email_extractor_data():
 async def get_email_manager_data():
     return fetch_sheet_data("manager")
 
+@app.get("/data/tldv-manager")
+async def get_tldv_manager_data():
+    return fetch_sheet_data("tldv manager")
+
 @app.get("/risk-report/scope-creep/summary")
 async def get_scope_creep_summary():
-    index_data = fetch_sheet_data("index")["data"]
-    extractor_data = fetch_sheet_data("extractor")["data"]
-    manager_data = fetch_sheet_data("manager")["data"]
+    index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
+    extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
+    manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
+    tldv_manager_data = [
+        {
+            **row,
+            "Mode": "call",
+            "Insights": row.get("Summary", ""),
+            "Date": row.get("Date", row.get("Timestamp", "")),
+        }
+        for row in fetch_sheet_data("tldv manager")["data"]
+    ]
 
     # Find all projects
+    all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
     summary = []
     signals = []
     corrective = []
 
-    # Helper: Deduplicate logs by Email Record ID, Mode, Date, or subject+insights (as available)
     def unique_entries(rows):
         seen = set()
         result = []
@@ -306,12 +322,8 @@ async def get_scope_creep_summary():
                 result.append(row)
         return result
 
-    # Smart scope creep/resolution signals by project
     creep_rows = {p: [] for p in project_names}
     resolution_rows = {p: [] for p in project_names}
-
-    all_rows = index_data + extractor_data + manager_data
-
     for row in all_rows:
         pname = row.get("Project Name", "")
         text = " ".join([str(v).lower() for v in row.values()])
@@ -337,7 +349,7 @@ async def get_scope_creep_summary():
         deduped = sorted(unique_entries(rows), key=lambda x: x.get("Date", ""), reverse=True)
         count = 0
         for r in deduped:
-            if r.get("Subject") or r.get("Body") or r.get("Insights"):
+            if r.get("Subject") or r.get("Body") or r.get("Insights") or r.get("Summary"):
                 insight_text = summarize_insight_llm(r)
                 signals.append({
                     "project": pname,
@@ -356,7 +368,7 @@ async def get_scope_creep_summary():
             deduped = sorted(unique_entries(rows), key=lambda x: x.get("Date", ""), reverse=True)
             if deduped:
                 r = deduped[0]
-                if r.get("Subject") or r.get("Body") or r.get("Insights"):
+                if r.get("Subject") or r.get("Body") or r.get("Insights") or r.get("Summary"):
                     insight_text = summarize_insight_llm(r)
                     corrective.append({
                         "project": pname,
@@ -371,10 +383,20 @@ async def get_scope_creep_summary():
 
 @app.get("/risk-report/scope-creep/pdf")
 async def generate_scope_creep_pdf():
-    index_data = fetch_sheet_data("index")["data"]
-    extractor_data = fetch_sheet_data("extractor")["data"]
-    manager_data = fetch_sheet_data("manager")["data"]
+    index_data      = [dict(row, Mode="meta")  for row in fetch_sheet_data("index")["data"]]
+    extractor_data  = [dict(row, Mode="email") for row in fetch_sheet_data("extractor")["data"]]
+    manager_data    = [dict(row, Mode="email") for row in fetch_sheet_data("manager")["data"]]
+    tldv_manager_data = [
+        {
+            **row,
+            "Mode": "call",
+            "Insights": row.get("Summary", ""),
+            "Date": row.get("Date", row.get("Timestamp", "")),
+        }
+        for row in fetch_sheet_data("tldv manager")["data"]
+    ]
 
+    all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
     summary = []
     signals = []
@@ -399,8 +421,6 @@ async def generate_scope_creep_pdf():
 
     creep_rows = {p: [] for p in project_names}
     resolution_rows = {p: [] for p in project_names}
-    all_rows = index_data + extractor_data + manager_data
-
     for row in all_rows:
         pname = row.get("Project Name", "")
         text = " ".join([str(v).lower() for v in row.values()])
@@ -422,12 +442,11 @@ async def generate_scope_creep_pdf():
             "SCOPE CREEP SIGNAL": status
         })
 
-    signals = []
     for pname, rows in creep_rows.items():
         deduped = sorted(unique_entries(rows), key=lambda x: x.get("Date", ""), reverse=True)
         count = 0
         for r in deduped:
-            if r.get("Subject") or r.get("Body") or r.get("Insights"):
+            if r.get("Subject") or r.get("Body") or r.get("Insights") or r.get("Summary"):
                 insight_text = summarize_insight_llm(r)
                 signals.append({
                     "Project Name": pname,
@@ -441,13 +460,12 @@ async def generate_scope_creep_pdf():
                 if count >= 2:
                     break
 
-    corrective = []
     for pname, rows in resolution_rows.items():
         if creep_rows.get(pname):
             deduped = sorted(unique_entries(rows), key=lambda x: x.get("Date", ""), reverse=True)
             if deduped:
                 r = deduped[0]
-                if r.get("Subject") or r.get("Body") or r.get("Insights"):
+                if r.get("Subject") or r.get("Body") or r.get("Insights") or r.get("Summary"):
                     insight_text = summarize_insight_llm(r)
                     corrective.append({
                         "Project Name": pname,
