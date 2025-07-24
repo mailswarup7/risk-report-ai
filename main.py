@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -10,6 +10,8 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from sheets_utils import fetch_sheet_data
 from google_docs_utils import get_scope_summary
+import re
+import traceback
 
 app = FastAPI()
 
@@ -76,157 +78,166 @@ def classify_scope_creep_with_llm(text):
     except Exception:
         return "TBD"
 
-def filter_project_rows(data, project_keywords):
-    # Return only rows where Project Name matches any keyword (case-insensitive, fuzzy)
-    if not project_keywords:
-        return data
-    result = []
-    for row in data:
-        pname = str(row.get("Project Name", "")).lower()
-        for kw in project_keywords:
-            if kw.lower() in pname:
-                result.append(row)
-                break
-    return result
-
-def find_best_project_update(data):
+def find_best_project_update(data, project_name=None):
     """Finds the latest, most informative update about progress/status for a given project."""
     for row in sorted(data, key=lambda x: x.get("Date", ""), reverse=True):
         text = " ".join([str(row.get(k, "")) for k in row.keys()]).lower()
+        if project_name and project_name.lower() not in text:
+            continue
         if "%" in text or "completion" in text or "milestone" in text or "demo" in text:
             return row
     if data:
         return sorted(data, key=lambda x: x.get("Date", ""), reverse=True)[0]
     return None
 
+def extract_completion_percent(all_data, project_name=None):
+    percent_re = re.compile(r'(\d{1,3})\s*%')
+    for row in sorted(all_data, key=lambda x: x.get("Date", ""), reverse=True):
+        text = " ".join([str(row.get(k, "")) for k in row.keys()])
+        if project_name and project_name.lower() not in text.lower():
+            continue
+        matches = percent_re.findall(text)
+        # Pick most "project-wide" value (not 100% for a subtask), prefer <100 for overall
+        if matches:
+            for match in matches:
+                try:
+                    pct = int(match)
+                    # Heuristically: overall completion is usually less than 100 except for wrapup
+                    if pct != 100 or len(matches) == 1:
+                        return f"{pct}%"
+                except Exception:
+                    continue
+    return None
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return {"error": "⚠️ GROQ_API_KEY not set in environment"}
-
-    index_data = fetch_sheet_data("index")["data"]
-    extractor_data = fetch_sheet_data("extractor")["data"]
-    manager_data = fetch_sheet_data("manager")["data"]
-
-    all_data = index_data + extractor_data + manager_data
-
-    project_keywords = list({
-        str(row.get("Project Name", "")).strip()
-        for row in all_data
-        if row.get("Project Name")
-    })
-
-    user_query = prompt.message.strip().lower()
-    matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
-    keywords_to_check = matched_keywords if matched_keywords else user_query.split()
-
-    # STRICT project-only rows
-    project_rows = filter_project_rows(all_data, matched_keywords)
-    relevant_index = filter_project_rows(index_data, matched_keywords)
-    relevant_extractor = filter_project_rows(extractor_data, matched_keywords)
-    relevant_manager = filter_project_rows(manager_data, matched_keywords)
-
-    # If no strict match, fallback to all, but warn LLM
-    best_row = find_best_project_update(project_rows) or find_best_project_update(all_data)
-
-    doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
-    doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
-
-    context = ""
-    if best_row:
-        context += "\n--- 📈 LATEST EVIDENCE ---\n"
-        context += "\n".join([f"{k}: {v}" for k, v in best_row.items() if v])
-        context += "\n\n"
-        if not project_rows:
-            context += "(Warning: No strict project match found, fallback to latest available update, may be unrelated)\n\n"
-
-    def summarize(data, label):
-        if not data:
-            return f"No data available in {label}.\n"
-        try:
-            data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
-        except Exception:
-            data_sorted = data
-        latest = [format_row(row) for row in data_sorted[:5]]
-        open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
-        completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
-        output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
-        if open_concerns:
-            output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
-        if completed:
-            output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
-        return output + "\n"
-
-    if not project_rows and not doc_context:
-        context += (
-            "You are a project governance and client success assistant.\n\n"
-            "The user asked a question, but no relevant scope or email records were found.\n"
-            "Kindly advise them to follow up with the project team for more information."
-        )
-    else:
-        context = (
-            f"{doc_summary}"
-            f"{context}"
-            f"{summarize(relevant_index, 'Index')}"
-            f"{summarize(relevant_extractor, 'Email Extractor')}"
-            f"{summarize(relevant_manager, 'Email Manager')}"
-        )
-
-    # --- Always define expanded_query! ---
-    expanded_query = prompt.message
-    if "scope creep" in user_query:
-        expanded_query += (
-            "\n\nPlease check if the project has introduced features, flows, or changes "
-            "that were not listed in the original scope document, or if any approvals are missing."
-        )
-
-    instruction_header = (
-        "You are an intelligent project governance and client success assistant AI.\n"
-        f"The user is asking about project(s): {', '.join(matched_keywords) if matched_keywords else '[unspecified]'}.\n"
-        "ONLY provide information about the specified project unless the user requests otherwise. "
-        "Do not mix evidence from other projects unless asked.\n"
-        "You have access to all project emails and logs. Search for any evidence, even if not in the latest updates. "
-        "Be specific in your findings. When a user asks about any kind of event (appreciation, bugs, risks, etc.), "
-        "scan ALL available records and answer with the best evidence you can find. Quote from emails if possible.\n"
-        "Your goals:\n"
-        "1. Detect scope creep from scope vs email.\n"
-        "2. Identify delays, risks, and new requests.\n"
-        "3. Read tone of emails to understand client pulse.\n"
-        "4. Compare assumptions vs delivery reality.\n"
-        "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
-        "Always back up your reasoning with facts from the content.\n\n"
-    )
-
-    final_context = truncate_text(instruction_header + context)
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "llama3-8b-8192",
-        "messages": [
-            {"role": "system", "content": final_context},
-            {"role": "user", "content": expanded_query}
-        ],
-        "temperature": 0.3
-    }
-
     try:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return {"error": "⚠️ GROQ_API_KEY not set in environment"}
+
+        index_data = fetch_sheet_data("index")["data"]
+        extractor_data = fetch_sheet_data("extractor")["data"]
+        manager_data = fetch_sheet_data("manager")["data"]
+
+        all_data = index_data + extractor_data + manager_data
+
+        project_keywords = list({
+            str(row.get("Project Name", "")).strip()
+            for row in all_data
+            if row.get("Project Name")
+        })
+
+        user_query = prompt.message.strip().lower()
+        matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
+        keywords_to_check = matched_keywords if matched_keywords else user_query.split()
+
+        # Always define expanded_query!
+        expanded_query = prompt.message
+        if "scope creep" in user_query:
+            expanded_query += (
+                "\n\nPlease check if the project has introduced features, flows, or changes "
+                "that were not listed in the original scope document, or if any approvals are missing."
+            )
+
+        # Find best/latest evidence
+        best_row = None
+        for kw in keywords_to_check:
+            best_row = find_best_project_update(all_data, project_name=kw)
+            if best_row:
+                break
+        if not best_row:
+            best_row = find_best_project_update(all_data)
+
+        # Extract % completion, if any
+        completion_percent = extract_completion_percent(all_data, project_name=matched_keywords[0] if matched_keywords else None)
+
+        # Build doc_context if project found
+        doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
+        doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
+
+        # Build context for LLM
+        context = ""
+        if completion_percent:
+            context += f"\n--- 📊 % COMPLETION FOUND ---\nOverall Completion: {completion_percent}\n\n"
+        if best_row:
+            context += "\n--- 📈 LATEST EVIDENCE ---\n"
+            context += "\n".join([f"{k}: {v}" for k, v in best_row.items() if v])
+            context += "\n\n"
+
+        def summarize(data, label):
+            if not data:
+                return f"No data available in {label}.\n"
+            try:
+                data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
+            except Exception:
+                data_sorted = data
+            latest = [format_row(row) for row in data_sorted[:5]]
+            open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
+            completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
+            output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
+            if open_concerns:
+                output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
+            if completed:
+                output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
+            return output + "\n"
+
+        if not best_row and not doc_context and not completion_percent:
+            context += (
+                "You are a project governance and client success assistant.\n\n"
+                "The user asked a question, but no relevant scope or email records were found.\n"
+                "Kindly advise them to follow up with the project team for more information."
+            )
+        else:
+            context = (
+                f"{doc_summary}"
+                f"{context}"
+                f"{summarize(index_data, 'Index')}"
+                f"{summarize(extractor_data, 'Email Extractor')}"
+                f"{summarize(manager_data, 'Email Manager')}"
+            )
+
+        # 🔥 STRONG LLM NUDGE
+        instruction_header = (
+            "You are an intelligent project governance and client success assistant AI.\n"
+            "You have access to all project emails and logs. Search for *any* evidence, even if not in the latest updates. "
+            "If you see a percentage completion (such as '80%'), ALWAYS report it and quote the source. "
+            "Be specific in your findings. When a user asks about any kind of event (appreciation, bugs, risks, etc.), "
+            "scan ALL available records and answer with the best evidence you can find. Quote from emails if possible.\n"
+            "Your goals:\n"
+            "1. Detect scope creep from scope vs email.\n"
+            "2. Identify delays, risks, and new requests.\n"
+            "3. Read tone of emails to understand client pulse.\n"
+            "4. Compare assumptions vs delivery reality.\n"
+            "5. Suggest PM best practices (Agile, PMP) if gaps found.\n"
+            "Always back up your reasoning with facts from the content.\n\n"
+        )
+
+        final_context = truncate_text(instruction_header + context)
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": "llama3-8b-8192",
+            "messages": [
+                {"role": "system", "content": final_context},
+                {"role": "user", "content": expanded_query}
+            ],
+            "temperature": 0.3
+        }
+
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
         return {"response": result["choices"][0]["message"]["content"]}
-    except requests.exceptions.RequestException as e:
-        return {
-            "error": str(e),
-            "payload": payload,
-            "response_text": getattr(e.response, "text", ""),
-            "status_code": getattr(e.response, "status_code", "")
-        }
+    except Exception as e:
+        print("Chat endpoint error:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal Error: {e}")
 
 @app.get("/data/index-sheet")
 async def get_index_sheet_data():
