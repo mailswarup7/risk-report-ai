@@ -76,6 +76,20 @@ def classify_scope_creep_with_llm(text):
     except Exception:
         return "TBD"
 
+def find_best_project_update(data, project_name=None):
+    """Finds the latest, most informative update about progress/status for a given project."""
+    # Priority: % Completion, demo, milestone, status, appreciation, etc.
+    for row in sorted(data, key=lambda x: x.get("Date", ""), reverse=True):
+        text = " ".join([str(row.get(k, "")) for k in row.keys()]).lower()
+        if project_name and project_name.lower() not in text:
+            continue
+        if "%" in text or "completion" in text or "milestone" in text or "demo" in text:
+            return row
+    # fallback: return latest
+    if data:
+        return sorted(data, key=lambda x: x.get("Date", ""), reverse=True)[0]
+    return None
+
 @app.post("/chat")
 async def chat_with_context(prompt: ChatPrompt):
     api_key = os.getenv("GROQ_API_KEY")
@@ -86,9 +100,11 @@ async def chat_with_context(prompt: ChatPrompt):
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
+    all_data = index_data + extractor_data + manager_data
+
     project_keywords = list({
         str(row.get("Project Name", "")).strip()
-        for row in index_data + manager_data
+        for row in all_data
         if row.get("Project Name")
     })
 
@@ -96,37 +112,36 @@ async def chat_with_context(prompt: ChatPrompt):
     matched_keywords = [kw for kw in project_keywords if kw.lower() in user_query]
     keywords_to_check = matched_keywords if matched_keywords else user_query.split()
 
-    expanded_query = prompt.message
-    if "scope creep" in user_query:
-        expanded_query += (
-            "\n\nPlease check if the project has introduced features, flows, or changes "
-            "that were not listed in the original scope document, or if any approvals are missing."
-        )
+    # 1. Always try to find the best, latest evidence from data
+    best_row = None
+    for kw in keywords_to_check:
+        best_row = find_best_project_update(all_data, project_name=kw)
+        if best_row:
+            break
+    if not best_row:
+        best_row = find_best_project_update(all_data)  # fallback to any
 
-    def filter_and_limit(data, project_names):
-        filtered = [row for row in data if str(row.get("Project Name", "")).lower() in [p.lower() for p in project_names]]
-        return sorted(filtered, key=lambda x: x.get("Date", ""), reverse=True)[:10]
-
-    relevant_index = filter_and_limit(index_data, matched_keywords)
-    relevant_extractor = filter_and_limit(extractor_data, matched_keywords)
-    relevant_manager = filter_and_limit(manager_data, matched_keywords)
-
+    # 2. Build doc_context if project is found
     doc_context = get_scope_summary(matched_keywords[0]) if matched_keywords else ""
     doc_summary = f"--- 📄 Scope Document: {matched_keywords[0]} ---\n{doc_context.strip()}\n\n" if doc_context else ""
+
+    # 3. Standard context, but include actual latest evidence if possible!
+    context = ""
+    if best_row:
+        context += "\n--- 📈 LATEST EVIDENCE ---\n"
+        context += "\n".join([f"{k}: {v}" for k, v in best_row.items() if v])
+        context += "\n\n"
 
     def summarize(data, label):
         if not data:
             return f"No data available in {label}.\n"
-
         try:
             data_sorted = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
         except Exception:
             data_sorted = data
-
         latest = [format_row(row) for row in data_sorted[:5]]
         open_concerns = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["issue", "delay", "blocked", "escalated"])]
         completed = [format_row(row) for row in data_sorted if any(k in str(row).lower() for k in ["100%", "completed", "finalized", "signed off"])]
-
         output = f"--- 📬 {label} ---\n\n📊 Latest Entries:\n" + "\n".join([str(r) for r in latest]) + "\n"
         if open_concerns:
             output += "\n⚠️ Open Concerns:\n" + "\n".join([str(r) for r in open_concerns[:3]]) + "\n"
@@ -134,8 +149,8 @@ async def chat_with_context(prompt: ChatPrompt):
             output += "\n✅ Completed Milestones:\n" + "\n".join([str(r) for r in completed[:3]]) + "\n"
         return output + "\n"
 
-    if not relevant_index and not relevant_extractor and not relevant_manager and not doc_context:
-        context = (
+    if not best_row and not doc_context:
+        context += (
             "You are a project governance and client success assistant.\n\n"
             "The user asked a question, but no relevant scope or email records were found.\n"
             "Kindly advise them to follow up with the project team for more information."
@@ -143,9 +158,10 @@ async def chat_with_context(prompt: ChatPrompt):
     else:
         context = (
             f"{doc_summary}"
-            f"{summarize(relevant_index, 'Index')}"
-            f"{summarize(relevant_extractor, 'Email Extractor')}"
-            f"{summarize(relevant_manager, 'Email Manager')}"
+            f"{context}"
+            f"{summarize(index_data, 'Index')}"
+            f"{summarize(extractor_data, 'Email Extractor')}"
+            f"{summarize(manager_data, 'Email Manager')}"
         )
 
     instruction_header = (
