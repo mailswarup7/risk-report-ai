@@ -22,7 +22,8 @@ SHEET_NAMES = {
 
 def fetch_sheet_data(sheet_name_key):
     try:
-        sheet_name = SHEET_NAMES.get(sheet_name_key)
+        # Use the explicit mapping if present, else use the provided key as the tab name
+        sheet_name = SHEET_NAMES.get(sheet_name_key, sheet_name_key)
         if not sheet_name:
             return {"error": f"Invalid sheet name key: {sheet_name_key}"}
 
