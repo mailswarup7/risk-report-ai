@@ -37,7 +37,6 @@ def format_row(row):
 def truncate_text(text, max_chars=15000):
     return text[:max_chars]
 
-# --- ENHANCED KEYWORDS for eval_status ---
 keywords = [
     "scope creep", "not in scope", "out of scope", "added", "new", "expanded", "unplanned",
     "unexpected", "extra", "missed in original scope", "client requested change", "additional work",
@@ -78,8 +77,24 @@ def classify_scope_creep_with_llm(text):
     except Exception:
         return "TBD"
 
+def extract_completion_percent(all_data, project_name=None):
+    percent_re = re.compile(r'(\d{1,3})\s*%')
+    for row in sorted(all_data, key=lambda x: x.get("Date", ""), reverse=True):
+        text = " ".join([str(row.get(k, "")) for k in row.keys()])
+        if project_name and project_name.lower() not in text.lower():
+            continue
+        matches = percent_re.findall(text)
+        if matches:
+            for match in matches:
+                try:
+                    pct = int(match)
+                    if pct != 100 or len(matches) == 1:
+                        return f"{pct}%"
+                except Exception:
+                    continue
+    return None
+
 def find_best_project_update(data, project_name=None):
-    """Finds the latest, most informative update about progress/status for a given project."""
     for row in sorted(data, key=lambda x: x.get("Date", ""), reverse=True):
         text = " ".join([str(row.get(k, "")) for k in row.keys()]).lower()
         if project_name and project_name.lower() not in text:
@@ -88,25 +103,6 @@ def find_best_project_update(data, project_name=None):
             return row
     if data:
         return sorted(data, key=lambda x: x.get("Date", ""), reverse=True)[0]
-    return None
-
-def extract_completion_percent(all_data, project_name=None):
-    percent_re = re.compile(r'(\d{1,3})\s*%')
-    for row in sorted(all_data, key=lambda x: x.get("Date", ""), reverse=True):
-        text = " ".join([str(row.get(k, "")) for k in row.keys()])
-        if project_name and project_name.lower() not in text.lower():
-            continue
-        matches = percent_re.findall(text)
-        # Pick most "project-wide" value (not 100% for a subtask), prefer <100 for overall
-        if matches:
-            for match in matches:
-                try:
-                    pct = int(match)
-                    # Heuristically: overall completion is usually less than 100 except for wrapup
-                    if pct != 100 or len(matches) == 1:
-                        return f"{pct}%"
-                except Exception:
-                    continue
     return None
 
 @app.post("/chat")
@@ -197,7 +193,6 @@ async def chat_with_context(prompt: ChatPrompt):
                 f"{summarize(manager_data, 'Email Manager')}"
             )
 
-        # 🔥 STRONG LLM NUDGE
         instruction_header = (
             "You are an intelligent project governance and client success assistant AI.\n"
             "You have access to all project emails and logs. Search for *any* evidence, even if not in the latest updates. "
@@ -257,32 +252,52 @@ async def get_scope_creep_summary():
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    def eval_status(row):
-        t = " ".join([str(v).lower() for v in row.values()])
-        if any(k in t for k in keywords): return "YES"
-        if any(k in t for k in resolutions): return "NO"
-        return classify_scope_creep_with_llm(t)
+    # Find all projects
+    project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
+    summary = []
+    signals = []
+    corrective = []
 
-    summary = [
-        {
-            "project": row.get("Project Name", ""),
-            "bu": row.get("BU", ""),
-            "solution_center": row.get("Solution Center", ""),
-            "status": eval_status(row)
-        }
-        for row in index_data
-    ]
+    # Build a quick look-up: project -> [rows with scope creep], [rows with resolution]
+    creep_rows = {p: [] for p in project_names}
+    resolution_rows = {p: [] for p in project_names}
 
-    signals = [
-        {k: r.get(k, "") for k in ["Project", "Mode", "Date", "Insights"]}
-        for r in extractor_data + manager_data
-        if any(k in str(r.get("Insights", "")).lower() for k in keywords)
-    ]
+    for row in index_data + extractor_data + manager_data:
+        pname = row.get("Project Name", "")
+        text = " ".join([str(v).lower() for v in row.values()])
+        if pname:
+            if any(k in text for k in keywords):
+                creep_rows.setdefault(pname, []).append(row)
+                signals.append({k: row.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]})
+            if any(k in text for k in resolutions):
+                resolution_rows.setdefault(pname, []).append(row)
 
+    # A1: For each project, YES/NO/TBD
+    for pname in project_names:
+        creep = creep_rows.get(pname, [])
+        resolved = resolution_rows.get(pname, [])
+        if creep:
+            status = "YES"
+        elif pname and not creep and (creep_rows.get(pname) == []):
+            # No scope creep at all in any data row for this project
+            status = "NO"
+        else:
+            status = "TBD"
+        # Pick any row for BU/Solution Center
+        base_row = next((row for row in index_data if row.get("Project Name", "") == pname), {})
+        summary.append({
+            "project": pname,
+            "bu": base_row.get("BU", ""),
+            "solution_center": base_row.get("Solution Center", ""),
+            "status": status
+        })
+
+    # A3: Corrective log only for projects that had scope creep signals and then resolution
     corrective = [
-        {k: r.get(k, "") for k in ["Project", "Mode", "Date", "Insights"]}
-        for r in extractor_data + manager_data
-        if any(k in str(r.get("Insights", "")).lower() for k in resolutions)
+        {k: r.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]}
+        for pname in project_names
+        if creep_rows.get(pname) and resolution_rows.get(pname)
+        for r in resolution_rows[pname]
     ]
 
     return JSONResponse(content={
@@ -297,30 +312,47 @@ async def generate_scope_creep_pdf():
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    def eval_status(row):
-        t = " ".join([str(v).lower() for v in row.values()])
-        if any(k in t for k in keywords): return "YES"
-        if any(k in t for k in resolutions): return "NO"
-        return classify_scope_creep_with_llm(t)
+    # Find all projects
+    project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
+    summary = []
+    signals = []
+    corrective = []
 
-    summary = [
-        {
-            "Project Name": row.get("Project Name", ""),
-            "BU": row.get("BU", ""),
-            "Solution Center": row.get("Solution Center", ""),
-            "SCOPE CREEP SIGNAL": eval_status(row)
-        }
-        for row in index_data
-    ]
+    creep_rows = {p: [] for p in project_names}
+    resolution_rows = {p: [] for p in project_names}
 
-    signals = [
-        r for r in extractor_data + manager_data
-        if any(k in str(r.get("Insights", "")).lower() for k in keywords)
-    ]
+    for row in index_data + extractor_data + manager_data:
+        pname = row.get("Project Name", "")
+        text = " ".join([str(v).lower() for v in row.values()])
+        if pname:
+            if any(k in text for k in keywords):
+                creep_rows.setdefault(pname, []).append(row)
+                signals.append({k: row.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]})
+            if any(k in text for k in resolutions):
+                resolution_rows.setdefault(pname, []).append(row)
+
+    for pname in project_names:
+        creep = creep_rows.get(pname, [])
+        resolved = resolution_rows.get(pname, [])
+        if creep:
+            status = "YES"
+        elif pname and not creep and (creep_rows.get(pname) == []):
+            status = "NO"
+        else:
+            status = "TBD"
+        base_row = next((row for row in index_data if row.get("Project Name", "") == pname), {})
+        summary.append({
+            "Project Name": pname,
+            "BU": base_row.get("BU", ""),
+            "Solution Center": base_row.get("Solution Center", ""),
+            "SCOPE CREEP SIGNAL": status
+        })
 
     corrective = [
-        r for r in extractor_data + manager_data
-        if any(k in str(r.get("Insights", "")).lower() for k in resolutions)
+        {k: r.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]}
+        for pname in project_names
+        if creep_rows.get(pname) and resolution_rows.get(pname)
+        for r in resolution_rows[pname]
     ]
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -358,7 +390,7 @@ async def generate_scope_creep_pdf():
     def draw_log(title, rows):
         nonlocal y
         draw_header(title)
-        headers = ["Project", "Mode", "Date", "Insights"]
+        headers = ["Project Name", "Mode", "Date", "Insights"]
         x_pos = [40, 150, 250, 320]
         c.setFont("Helvetica-Bold", 11)
         for i, h in enumerate(headers):
