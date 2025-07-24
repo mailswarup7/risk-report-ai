@@ -31,7 +31,7 @@ def row_matches_query(row, keywords):
     return any(keyword.lower() in text for keyword in keywords)
 
 def format_row(row):
-    keys = ["Email Record ID", "Date", "From", "Subject", "Body", "Project Name", "Insights"]
+    keys = ["Email Record ID", "Date", "From", "Subject", "Body", "Project Name", "BU", "Solution Center", "Mode", "Insights"]
     return {k: row.get(k, "") for k in keys if k in row}
 
 def truncate_text(text, max_chars=15000):
@@ -193,6 +193,7 @@ async def chat_with_context(prompt: ChatPrompt):
                 f"{summarize(manager_data, 'Email Manager')}"
             )
 
+        # 🔥 STRONG LLM NUDGE
         instruction_header = (
             "You are an intelligent project governance and client success assistant AI.\n"
             "You have access to all project emails and logs. Search for *any* evidence, even if not in the latest updates. "
@@ -258,32 +259,52 @@ async def get_scope_creep_summary():
     signals = []
     corrective = []
 
-    # Build a quick look-up: project -> [rows with scope creep], [rows with resolution]
+    # Helper: Deduplicate logs by Email Record ID, Mode, Date, or subject+insights (as available)
+    def unique_entries(rows):
+        seen = set()
+        result = []
+        for row in rows:
+            key = (
+                row.get("Project Name", ""),
+                row.get("Email Record ID", ""),
+                row.get("Mode", ""),
+                row.get("Date", ""),
+                row.get("Subject", ""),
+                row.get("Insights", ""),
+            )
+            if key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result
+
+    # Smart scope creep/resolution signals by project
     creep_rows = {p: [] for p in project_names}
     resolution_rows = {p: [] for p in project_names}
 
-    for row in index_data + extractor_data + manager_data:
+    all_rows = index_data + extractor_data + manager_data
+
+    for row in all_rows:
         pname = row.get("Project Name", "")
         text = " ".join([str(v).lower() for v in row.values()])
         if pname:
-            if any(k in text for k in keywords):
+            # Scope Creep: only if scope keywords found, AND the entry is not an empty/noisy row
+            if any(k in text for k in keywords) and len(text) > 20:
                 creep_rows.setdefault(pname, []).append(row)
-                signals.append({k: row.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]})
-            if any(k in text for k in resolutions):
+            # Resolution: only if resolution keywords found
+            if any(k in text for k in resolutions) and len(text) > 10:
                 resolution_rows.setdefault(pname, []).append(row)
 
-    # A1: For each project, YES/NO/TBD
+    # --- A1: Project-wise summary ---
     for pname in project_names:
         creep = creep_rows.get(pname, [])
         resolved = resolution_rows.get(pname, [])
         if creep:
             status = "YES"
-        elif pname and not creep and (creep_rows.get(pname) == []):
-            # No scope creep at all in any data row for this project
+        elif pname and not creep:
             status = "NO"
         else:
             status = "TBD"
-        # Pick any row for BU/Solution Center
+        # For each summary row, show BU and Solution Center from any relevant row
         base_row = next((row for row in index_data if row.get("Project Name", "") == pname), {})
         summary.append({
             "project": pname,
@@ -292,18 +313,46 @@ async def get_scope_creep_summary():
             "status": status
         })
 
-    # A3: Corrective log only for projects that had scope creep signals and then resolution
-    corrective = [
-        {k: r.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]}
-        for pname in project_names
-        if creep_rows.get(pname) and resolution_rows.get(pname)
-        for r in resolution_rows[pname]
-    ]
+    # --- A2: Scope Creep Signal Log (unique and meaningful only) ---
+    signal_rows = []
+    for pname, rows in creep_rows.items():
+        deduped = unique_entries(rows)
+        for r in deduped:
+            if r.get("Insights") or r.get("Subject") or r.get("Body"):
+                signal_rows.append({
+                    "project": pname,
+                    "bu": r.get("BU", ""),
+                    "solution_center": r.get("Solution Center", ""),
+                    "mode": r.get("Mode", ""),
+                    "date": r.get("Date", ""),
+                    "insights": r.get("Insights", ""),
+                    "subject": r.get("Subject", ""),
+                    "email_id": r.get("Email Record ID", ""),
+                })
+
+    # --- A3: Corrective Measures Log (only if project had scope creep and a later resolution) ---
+    corrective_rows = []
+    for pname, rows in resolution_rows.items():
+        # Only show a resolution if this project had a scope creep signal before
+        if creep_rows.get(pname):
+            deduped = unique_entries(rows)
+            for r in deduped:
+                if r.get("Insights") or r.get("Subject") or r.get("Body"):
+                    corrective_rows.append({
+                        "project": pname,
+                        "bu": r.get("BU", ""),
+                        "solution_center": r.get("Solution Center", ""),
+                        "mode": r.get("Mode", ""),
+                        "date": r.get("Date", ""),
+                        "insights": r.get("Insights", ""),
+                        "subject": r.get("Subject", ""),
+                        "email_id": r.get("Email Record ID", ""),
+                    })
 
     return JSONResponse(content={
         "summary": summary,
-        "signals": signals,
-        "corrective": corrective
+        "signals": signal_rows,
+        "corrective": corrective_rows
     })
 
 @app.get("/risk-report/scope-creep/pdf")
@@ -312,23 +361,39 @@ async def generate_scope_creep_pdf():
     extractor_data = fetch_sheet_data("extractor")["data"]
     manager_data = fetch_sheet_data("manager")["data"]
 
-    # Find all projects
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
     summary = []
     signals = []
     corrective = []
 
+    def unique_entries(rows):
+        seen = set()
+        result = []
+        for row in rows:
+            key = (
+                row.get("Project Name", ""),
+                row.get("Email Record ID", ""),
+                row.get("Mode", ""),
+                row.get("Date", ""),
+                row.get("Subject", ""),
+                row.get("Insights", ""),
+            )
+            if key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result
+
     creep_rows = {p: [] for p in project_names}
     resolution_rows = {p: [] for p in project_names}
+    all_rows = index_data + extractor_data + manager_data
 
-    for row in index_data + extractor_data + manager_data:
+    for row in all_rows:
         pname = row.get("Project Name", "")
         text = " ".join([str(v).lower() for v in row.values()])
         if pname:
-            if any(k in text for k in keywords):
+            if any(k in text for k in keywords) and len(text) > 20:
                 creep_rows.setdefault(pname, []).append(row)
-                signals.append({k: row.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]})
-            if any(k in text for k in resolutions):
+            if any(k in text for k in resolutions) and len(text) > 10:
                 resolution_rows.setdefault(pname, []).append(row)
 
     for pname in project_names:
@@ -336,7 +401,7 @@ async def generate_scope_creep_pdf():
         resolved = resolution_rows.get(pname, [])
         if creep:
             status = "YES"
-        elif pname and not creep and (creep_rows.get(pname) == []):
+        elif pname and not creep:
             status = "NO"
         else:
             status = "TBD"
@@ -348,12 +413,38 @@ async def generate_scope_creep_pdf():
             "SCOPE CREEP SIGNAL": status
         })
 
-    corrective = [
-        {k: r.get(k, "") for k in ["Project Name", "Mode", "Date", "Insights"]}
-        for pname in project_names
-        if creep_rows.get(pname) and resolution_rows.get(pname)
-        for r in resolution_rows[pname]
-    ]
+    signal_rows = []
+    for pname, rows in creep_rows.items():
+        deduped = unique_entries(rows)
+        for r in deduped:
+            if r.get("Insights") or r.get("Subject") or r.get("Body"):
+                signal_rows.append({
+                    "Project Name": pname,
+                    "BU": r.get("BU", ""),
+                    "Solution Center": r.get("Solution Center", ""),
+                    "Mode": r.get("Mode", ""),
+                    "Date": r.get("Date", ""),
+                    "Insights": r.get("Insights", ""),
+                    "Subject": r.get("Subject", ""),
+                    "Email Record ID": r.get("Email Record ID", ""),
+                })
+
+    corrective_rows = []
+    for pname, rows in resolution_rows.items():
+        if creep_rows.get(pname):
+            deduped = unique_entries(rows)
+            for r in deduped:
+                if r.get("Insights") or r.get("Subject") or r.get("Body"):
+                    corrective_rows.append({
+                        "Project Name": pname,
+                        "BU": r.get("BU", ""),
+                        "Solution Center": r.get("Solution Center", ""),
+                        "Mode": r.get("Mode", ""),
+                        "Date": r.get("Date", ""),
+                        "Insights": r.get("Insights", ""),
+                        "Subject": r.get("Subject", ""),
+                        "Email Record ID": r.get("Email Record ID", ""),
+                    })
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     c = canvas.Canvas(temp_file.name, pagesize=A4)
@@ -369,7 +460,7 @@ async def generate_scope_creep_pdf():
     def draw_table(headers, rows, bullet_colors=None):
         nonlocal y
         c.setFont("Helvetica-Bold", 11)
-        x_pos = [40, 200, 350, 480]
+        x_pos = [40, 150, 260, 370, 480, 580, 680]
         for i, h in enumerate(headers):
             c.drawString(x_pos[i], y, h)
         y -= 18
@@ -384,16 +475,15 @@ async def generate_scope_creep_pdf():
                     c.setFillColor(bullet_colors.get(t, colors.grey))
                     c.circle(x_pos[i] - 10, y + 3, 5, fill=1)
                     c.setFillColor(colors.black)
-                c.drawString(x_pos[i], y, t)
+                c.drawString(x_pos[i], y, t[:22])
             y -= 15
 
-    def draw_log(title, rows):
+    def draw_log(title, rows, log_headers):
         nonlocal y
         draw_header(title)
-        headers = ["Project Name", "Mode", "Date", "Insights"]
-        x_pos = [40, 150, 250, 320]
+        x_pos = [40, 150, 260, 370, 480, 580, 680]
         c.setFont("Helvetica-Bold", 11)
-        for i, h in enumerate(headers):
+        for i, h in enumerate(log_headers):
             c.drawString(x_pos[i], y, h)
         y -= 18
         c.setFont("Helvetica", 10)
@@ -401,8 +491,8 @@ async def generate_scope_creep_pdf():
             if y < 100:
                 c.showPage()
                 y = height - 50
-            for i, k in enumerate(headers):
-                c.drawString(x_pos[i], y, str(row.get(k, ""))[:90])
+            for i, k in enumerate(log_headers):
+                c.drawString(x_pos[i], y, str(row.get(k, ""))[:22])
             y -= 15
 
     draw_header("Scope Creep Summary Report")
@@ -412,8 +502,8 @@ async def generate_scope_creep_pdf():
         summary,
         bullet_colors={"YES": colors.red, "NO": colors.green, "TBD": colors.gray}
     )
-    draw_log("A.2 Scope Creep Signal Log", signals)
-    draw_log("A.3 Corrective Measures Taken Log", corrective)
+    draw_log("A.2 Scope Creep Signal Log", signal_rows, ["Project Name", "BU", "Solution Center", "Mode", "Date", "Subject", "Insights"])
+    draw_log("A.3 Corrective Measures Taken Log", corrective_rows, ["Project Name", "BU", "Solution Center", "Mode", "Date", "Subject", "Insights"])
 
     c.showPage()
     c.save()
