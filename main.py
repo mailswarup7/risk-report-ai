@@ -168,7 +168,7 @@ async def chat_with_context(prompt: ChatPrompt):
         index_data      = safe_fetch("index", mode="meta")
         extractor_data  = safe_fetch("extractor", mode="email")
         manager_data    = safe_fetch("manager", mode="email")
-        tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
+        tldv_manager_data = safe_fetch("tldv Manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
         all_data = index_data + extractor_data + manager_data + tldv_manager_data
 
         project_keywords = list({
@@ -319,14 +319,14 @@ async def get_email_manager_data():
 
 @app.get("/data/tldv-manager")
 async def get_tldv_manager_data():
-    return fetch_sheet_data("tldv manager")
+    return fetch_sheet_data("tldv Manager")
 
 @app.get("/risk-report/scope-creep/summary")
 async def get_scope_creep_summary():
     index_data      = safe_fetch("index", mode="meta")
     extractor_data  = safe_fetch("extractor", mode="email")
     manager_data    = safe_fetch("manager", mode="email")
-    tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
+    tldv_manager_data = safe_fetch("tldv Manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
 
     all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
@@ -418,7 +418,7 @@ async def generate_scope_creep_pdf():
     index_data      = safe_fetch("index", mode="meta")
     extractor_data  = safe_fetch("extractor", mode="email")
     manager_data    = safe_fetch("manager", mode="email")
-    tldv_manager_data = safe_fetch("tldv manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
+    tldv_manager_data = safe_fetch("tldv Manager", mode="call", summary_field="Summary", date_fields=["Date", "Timestamp"])
 
     all_rows = index_data + extractor_data + manager_data + tldv_manager_data
     project_names = set(row.get("Project Name", "") for row in index_data if row.get("Project Name", ""))
